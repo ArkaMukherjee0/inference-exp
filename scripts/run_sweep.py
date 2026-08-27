@@ -276,11 +276,15 @@ def build_runner(condition: RunConfig, cfg: SweepConfig):
         binary = _llamacpp_binary(cfg)
         if not binary:
             raise RunnerError("llamacpp stack requires 'model.binary' in the sweep config")
+        model = raw.get("model", {})
         return LlamaCppRunner(
             condition,
             binary=binary,
-            model_path=raw.get("model", {}).get("target_gguf", condition.target_model),
-            draft_model_path=raw.get("model", {}).get("draft_gguf", condition.draft_model),
+            baseline_binary=model.get("baseline_binary"),
+            model_path=model.get("target_gguf", condition.target_model),
+            draft_model_path=model.get("draft_gguf", condition.draft_model),
+            extra_args=list(model.get("extra_args") or []),
+            baseline_extra_args=list(model.get("baseline_extra_args") or []),
         )
     raise ValueError(f"unknown stack {condition.stack!r}")
 

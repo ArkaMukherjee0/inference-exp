@@ -46,33 +46,38 @@ def test_parses_the_captured_sample(llamacpp_output):
     cfg = _cpu_config()
     result = LlamaCppRunner.parse_output(stdout=llamacpp_output, stderr="", config=cfg)
 
-    assert result.ttft_ms == pytest.approx(412.19)
-    assert result.total_ms == pytest.approx(412.19 + 3104.27)
-    assert result.prompt_tokens == 87
+    assert result.ttft_ms == pytest.approx(669.0)
+    assert result.total_ms == pytest.approx(669.0 + 4644.0)
+    assert result.prompt_tokens == 39
     # 53 accepted + 20 bonus tokens = 73, matching n_predict in the sample.
     assert result.output_tokens == 73
-    assert result.draft_tokens_proposed == 80
+    assert result.draft_tokens_proposed == 76
 
 
 def test_prefill_is_not_mistaken_for_decode(llamacpp_output):
-    """llama.cpp prints both 'prompt eval time' and 'eval time'.
+    """The two halves of the timing must not be swapped or conflated.
 
-    A pattern matching either would read prefill as decode and invert both halves of
-    every CPU timing, which would look entirely plausible in the results.
+    Under speculation the perf counters are actively misleading: a verification step
+    decodes gamma+1 tokens at once, llama.cpp books every multi-token decode as
+    'prompt eval time', and 'eval time' collapses to 0.00 ms / 1 runs. Reading them
+    would inflate prefill by the whole verification cost and drop decode from the
+    total -- which would look entirely plausible in the results.
     """
     cfg = _cpu_config()
     result = LlamaCppRunner.parse_output(stdout=llamacpp_output, stderr="", config=cfg)
-    assert result.ttft_ms == pytest.approx(412.19)
-    assert result.ttft_ms != pytest.approx(3104.27)
-    assert result.extra["decode_ms"] == pytest.approx(3104.27)
+    assert result.ttft_ms == pytest.approx(669.0)
+    assert result.extra["decode_ms"] == pytest.approx(4644.0)
+    # The counters this must NOT have used, present in the same sample.
+    assert "eval time =       0.00 ms" in llamacpp_output
+    assert result.ttft_ms < 1000.0
 
 
 def test_histogram_matches_the_sampled_steps(llamacpp_output):
     cfg = _cpu_config()
     result = LlamaCppRunner.parse_output(stdout=llamacpp_output, stderr="", config=cfg)
     hist = result.accept_length_histogram
-    # The sample has 20 steps: two 0s, three 1s, three 2s, four 3s, eight 4s.
-    assert hist == [2, 3, 3, 4, 8]
+    # The sample has 20 steps: four 0s, one 1, four 2s, no 3s, eleven 4s.
+    assert hist == [4, 1, 4, 0, 11]
     assert sum(hist) == 20
     assert sum(k * n for k, n in enumerate(hist)) == 53
 
@@ -83,7 +88,7 @@ def test_parsed_sample_builds_a_schema_valid_record(llamacpp_output):
     rec = build_record(cfg=cfg, env=ENV, prompt_id="gsm8k-test-1", repeat_idx=0,
                        is_warmup=False, result=result)
     validate_record(rec)
-    assert rec["acceptance_rate"] == pytest.approx(53 / 80)
+    assert rec["acceptance_rate"] == pytest.approx(53 / 76)
     assert rec["mean_accept_length"] == pytest.approx(53 / 20 + 1.0)
 
 
@@ -95,16 +100,44 @@ def test_gamma_mismatch_is_refused(llamacpp_output):
 
 
 def test_missing_perf_counters_raise():
+    """The baseline arm reads llama.cpp's counters, and refuses without them."""
+    cfg = _cpu_config(spec_method="none", num_speculative_tokens=None, draft_model=None)
     with pytest.raises(RunnerError, match="prompt eval time"):
-        LlamaCppRunner.parse_output(stdout="nothing useful here", stderr="",
-                                    config=_cpu_config())
+        LlamaCppRunner.parse_output(stdout="nothing useful here", stderr="", config=cfg)
+
+
+def test_missing_encode_decode_clocks_raise():
+    """A speculative run without the example's own clocks has no usable timing.
+
+    The perf counters below are exactly what such a run prints, and are exactly what
+    must not be substituted for the missing measurement.
+    """
+    blob = (
+        "common_perf_print: prompt eval time =   1784.96 ms /    79 tokens\n"
+        "common_perf_print:        eval time =      0.00 ms /     1 runs\n"
+        "accepted 4 draft tokens\nn_draft   = 4\nn_drafted = 4\nn_accept  = 4\n"
+    )
+    with pytest.raises(RunnerError, match="decoded"):
+        LlamaCppRunner.parse_output(stdout=blob, stderr="", config=_cpu_config())
+
+
+def test_step_counts_must_describe_the_timed_run():
+    """The steps and the decode clock must be talking about the same generation."""
+    blob = (
+        "encoded   10 tokens in    0.100 seconds, speed:  100.000 t/s\n"
+        "decoded   40 tokens in    1.000 seconds, speed:   40.000 t/s\n"
+        "accepted 4 draft tokens\naccepted 4 draft tokens\n"
+        "n_draft   = 4\nn_drafted = 8\nn_accept  = 8\n"
+    )
+    with pytest.raises(RunnerError, match="decoded 40"):
+        LlamaCppRunner.parse_output(stdout=blob, stderr="", config=_cpu_config())
 
 
 def test_aggregate_only_output_is_refused():
     """Totals without per-step counts cannot make a distribution, so nothing is invented."""
     blob = (
-        "llama_perf_context_print: prompt eval time =  100.00 ms /  10 tokens\n"
-        "llama_perf_context_print:        eval time = 1000.00 ms /  20 runs\n"
+        "encoded   10 tokens in    0.100 seconds, speed:  100.000 t/s\n"
+        "decoded   73 tokens in    1.000 seconds, speed:   73.000 t/s\n"
         "n_draft   = 4\nn_drafted = 80\nn_accept  = 53\n"
     )
     with pytest.raises(RunnerError, match="per-step"):
@@ -113,8 +146,8 @@ def test_aggregate_only_output_is_refused():
 
 def test_per_step_counts_must_agree_with_the_reported_total():
     blob = (
-        "llama_perf_context_print: prompt eval time =  100.00 ms /  10 tokens\n"
-        "llama_perf_context_print:        eval time = 1000.00 ms /  20 runs\n"
+        "encoded   10 tokens in    0.100 seconds, speed:  100.000 t/s\n"
+        "decoded    8 tokens in    1.000 seconds, speed:    8.000 t/s\n"
         "accepted 4 draft tokens\naccepted 2 draft tokens\n"
         "n_draft   = 4\nn_drafted = 8\nn_accept  = 53\n"
     )
@@ -349,3 +382,28 @@ def test_speculation_silently_disabled_raises():
     )
     with pytest.raises(RunnerError, match="resolved none"):
         runner._verify_resolution(requested_spec={"num_speculative_tokens": 4})
+
+
+def test_flashinfer_sampler_is_disabled_by_default():
+    """FlashInfer JIT-compiles its sampler and needs nvcc; a driver-only box has none.
+
+    Pinning it off also stops the sampler silently differing between instances depending
+    on whether a CUDA toolkit happens to be installed.
+    """
+    import inspect
+
+    source = inspect.getsource(VLLMRunner.setup)
+    assert 'VLLM_USE_FLASHINFER_SAMPLER' in source
+    # setdefault, not assignment: an operator with nvcc may opt back in.
+    assert 'os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")' in source
+
+
+def test_engine_env_vars_are_captured_as_provenance():
+    """Which kernels ran is provenance, so the engine env goes in the record."""
+    import inspect
+
+    from core import env
+
+    source = inspect.getsource(env.capture_env)
+    assert "engine_env" in source
+    assert "VLLM_" in source

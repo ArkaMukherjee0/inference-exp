@@ -289,6 +289,15 @@ def capture_env(
         "stack_version": stack_version(stack, llamacpp_binary=llamacpp_binary),
         "driver": driver_string(platform_name),
         "env": {
+            # Engine env vars change which kernels run, so they are provenance, not
+            # configuration trivia. VLLM_USE_FLASHINFER_SAMPLER in particular decides
+            # whether sampling goes through a JIT-compiled FlashInfer kernel or the
+            # native path -- a difference in per-step overhead that would otherwise vary
+            # silently between boxes depending on whether a CUDA toolkit is installed.
+            "engine_env": {
+                k: v for k, v in os.environ.items()
+                if k.startswith(("VLLM_", "NCCL_", "CUDA_VISIBLE", "TORCH_"))
+            },
             "captured_at": utc_now(),
             "python": sys.version.split()[0],
             "os": f"{platform.system()} {platform.release()} ({platform.version()})",

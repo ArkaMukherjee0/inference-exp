@@ -127,15 +127,62 @@ def _check_hf_repos(cfg) -> bool:
     if shutil.which("huggingface-cli") is None:
         print("  NOTE: huggingface-cli not on PATH (pip install -U 'huggingface_hub[cli]')")
 
-    # Speculative decoding needs a shared vocabulary between draft and target; a mismatch
-    # is not a slowdown, it is a wrong answer.
+    # Speculative decoding indexes the target's logits with the draft's token ids, so a
+    # vocabulary mismatch is an out-of-bounds read, not merely a low acceptance rate.
+    # vLLM rejects such a pair -- but only after loading configs and spinning up an
+    # engine, a minute or more into a run. Checking it here costs one small file per repo.
     pairs = {(c.target_model, c.draft_model) for c in cfg.conditions if c.draft_model}
     if pairs:
         print()
-        print("  Draft/target pairs (must share a tokenizer and vocabulary):")
+        print("  Draft/target vocabulary check:")
         for target, draft in sorted(pairs):
-            print(f"    {draft}\n      -> {target}")
+            ok &= _check_vocab_pair(target, draft)
     return ok
+
+
+def _vocab_size(repo: str) -> int | None:
+    """Read vocab_size from a repo's config.json without downloading any weights."""
+    local = Path(repo).expanduser()
+    config_path: Path | None = None
+    if local.is_dir() and (local / "config.json").is_file():
+        config_path = local / "config.json"
+    else:
+        try:
+            from huggingface_hub import hf_hub_download
+
+            config_path = Path(hf_hub_download(repo, "config.json"))
+        except Exception:  # noqa: BLE001 -- gated/offline/missing all mean "cannot tell"
+            return None
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    size = data.get("vocab_size")
+    if size is None:
+        text_cfg = data.get("text_config") or {}
+        size = text_cfg.get("vocab_size")
+    return int(size) if size else None
+
+
+def _check_vocab_pair(target: str, draft: str) -> bool:
+    t_vocab = _vocab_size(target)
+    d_vocab = _vocab_size(draft)
+    label = f"{draft} -> {target}"
+
+    if t_vocab is None or d_vocab is None:
+        # Not a failure: the repo may be gated, or this box may be offline. Say so
+        # rather than implying the pair was verified.
+        print(f"    UNVERIFIED  {label}")
+        print(f"                could not read vocab_size "
+              f"(target={t_vocab}, draft={d_vocab}); check auth/network")
+        return True
+    if t_vocab != d_vocab:
+        print(f"    MISMATCH    {label}")
+        print(f"                target vocab_size={t_vocab}, draft vocab_size={d_vocab}. "
+              "vLLM will refuse this pair.")
+        return False
+    print(f"    OK          {label}  (vocab_size={t_vocab})")
+    return True
 
 
 def _check_llamacpp(cfg) -> bool:
@@ -144,13 +191,25 @@ def _check_llamacpp(cfg) -> bool:
     model = cfg.raw.get("model") or {}
     ok = True
 
-    binary = model.get("binary")
-    resolved = shutil.which(binary) if binary else None
-    if resolved or (binary and Path(binary).is_file()):
-        print(f"  binary       OK        {resolved or binary}")
-    else:
-        print(f"  binary       MISSING   {binary!r} not on PATH and not a file")
-        ok = False
+    # Two binaries: the speculative example cannot run without a draft model, so the
+    # gamma=0 baseline is measured by the plain completion tool. Both are checked.
+    needs_baseline = any(c.spec_method == "none" for c in cfg.conditions)
+    for key, label, required in (
+        ("binary", "binary", True),
+        ("baseline_binary", "baseline_bin", needs_baseline),
+    ):
+        binary = model.get(key)
+        if not binary:
+            if required:
+                print(f"  {label:12s} MISSING   not set in config")
+                ok = False
+            continue
+        resolved = shutil.which(binary) if binary else None
+        if resolved or Path(binary).is_file():
+            print(f"  {label:12s} OK        {resolved or binary}")
+        else:
+            print(f"  {label:12s} MISSING   {binary!r} not on PATH and not a file")
+            ok = False
 
     for key in ("target_gguf", "draft_gguf"):
         raw = model.get(key)

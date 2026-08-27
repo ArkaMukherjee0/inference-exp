@@ -58,6 +58,21 @@ class VLLMRunner:
             # Must be set before the engine initializes NCCL.
             os.environ["NCCL_P2P_DISABLE"] = "1"
 
+        # FlashInfer's sampling kernel is JIT-compiled at engine warmup and needs nvcc,
+        # i.e. the full CUDA toolkit rather than just the driver. On a box with only the
+        # driver the engine dies during warmup with "Could not find nvcc".
+        #
+        # Disabling it is also the better default for this study, for a reason beyond
+        # convenience: whether a box happens to have a CUDA toolkit installed would
+        # otherwise silently change which sampler runs, and therefore the per-step
+        # overhead, between instances that are supposed to be comparable. Pinning it off
+        # everywhere makes the sampler one less thing that varies by machine.
+        #
+        # An operator who has nvcc and explicitly wants FlashInfer can set the variable
+        # themselves; we only supply the default. Either way the effective value is
+        # recorded in the environment blob of every record.
+        os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
         kwargs: dict[str, Any] = {
             "model": cfg.target_model,
             "tensor_parallel_size": cfg.tensor_parallel_size,

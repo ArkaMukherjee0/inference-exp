@@ -291,7 +291,10 @@ def _expand_axes(
 # differs between machines, and putting it in the condition hash would give the same
 # measurement two different condition_ids on two hosts. What the weights *are* is
 # captured by target_model and gguf_quant, which do enter the hash.
-_MODEL_WIRING_KEYS = frozenset({"binary", "target_gguf", "draft_gguf"})
+_MODEL_WIRING_KEYS = frozenset({
+    "binary", "baseline_binary", "target_gguf", "draft_gguf",
+    "extra_args", "baseline_extra_args",
+})
 
 
 def _model_axis(model: Any, where: str) -> list[dict[str, Any]]:

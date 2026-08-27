@@ -245,3 +245,34 @@ def test_missing_figure_inputs_are_reported_not_faked(measured_df, tmp_outdir):
 def test_render_figures_can_be_made_strict(measured_df, tmp_outdir):
     with pytest.raises(Exception):
         build_report.render_figures(measured_df, tmp_outdir, skip_on_missing_inputs=False)
+
+
+# -- model preflight -------------------------------------------------------------------
+
+
+def test_vocab_mismatch_is_reported_as_a_failure(monkeypatch):
+    """Speculative decoding indexes target logits with draft token ids.
+
+    A mismatched vocabulary is an out-of-bounds read, not a low acceptance rate. vLLM
+    rejects the pair -- but only after spinning up an engine, a minute into a run.
+    """
+    from scripts import setup_data
+
+    sizes = {"org/target": 128256, "org/draft": 49152}
+    monkeypatch.setattr(setup_data, "_vocab_size", lambda repo: sizes[repo])
+    assert setup_data._check_vocab_pair("org/target", "org/draft") is False
+
+
+def test_matching_vocab_passes(monkeypatch):
+    from scripts import setup_data
+
+    monkeypatch.setattr(setup_data, "_vocab_size", lambda repo: 128256)
+    assert setup_data._check_vocab_pair("org/target", "org/draft") is True
+
+
+def test_unreadable_vocab_is_unverified_not_a_pass_or_a_failure(monkeypatch):
+    """A gated repo or an offline box means 'cannot tell', which must not read as 'checked'."""
+    from scripts import setup_data
+
+    monkeypatch.setattr(setup_data, "_vocab_size", lambda repo: None)
+    assert setup_data._check_vocab_pair("org/target", "org/draft") is True

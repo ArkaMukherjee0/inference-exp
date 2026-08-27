@@ -1,0 +1,44 @@
+diff --git a/examples/speculative/speculative.cpp b/examples/speculative/speculative.cpp
+index 17071aa..564c3ca 100644
+--- a/examples/speculative/speculative.cpp
++++ b/examples/speculative/speculative.cpp
+@@ -418,6 +418,17 @@ int main(int argc, char ** argv) {
+                 }
+                 ++n_predict;
+ 
++                // Stop at exactly n_predict tokens. Left alone the loop finishes the
++                // current verification step and overshoots by up to n_max, so every
++                // speculative run would emit a few more tokens than its baseline, by an
++                // amount that grows with the draft length being measured. Breaking here
++                // -- before the acceptance bookkeeping -- keeps n_accept and the
++                // per-step counts consistent: each step still emits i_dft + 1 tokens.
++                if (params.n_predict >= 0 && n_predict >= params.n_predict) {
++                    LOG("%s", token_str.c_str());
++                    break;
++                }
++
+                 if (accept) {
+                     ++n_accept;
+                     ++n_past_tgt;
+@@ -438,6 +449,12 @@ int main(int argc, char ** argv) {
+         }
+ 
+         {
++            // Per-step acceptance count. i_dft is the number of drafted tokens accepted
++            // in this verification step, so these lines sum to n_accept by construction.
++            // The aggregate totals alone cannot reconstruct the accepted-run-length
++            // distribution that figure 06 reports.
++            LOG_INF("accepted %d draft tokens\n", i_dft);
++
+             LOG_DBG("the sampled target token (%d, '%s') did not match, or we ran out of drafted tokens\n", token_id, token_str.c_str());
+ 
+             // TODO: simplify
+@@ -475,7 +492,7 @@ int main(int argc, char ** argv) {
+             ++n_past_dft;
+         }
+ 
+-        if ((params.n_predict >= 0 && n_predict > params.n_predict) || has_eos) {
++        if ((params.n_predict >= 0 && n_predict >= params.n_predict) || has_eos) {
+             break;
+         }
+ 
