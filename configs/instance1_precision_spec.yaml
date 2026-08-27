@@ -1,0 +1,56 @@
+# Instance 1 -- E1 (composition) and E2 (gamma sweep vs the analytical model).
+# The headline experiment: does speculative speedup survive lower precision?
+#
+# Each precision level needs its own checkpoint, because fp8 and w4a16 are properties of
+# the weights on disk, not runtime flags. The runner verifies that what vLLM resolved
+# matches what is claimed here and refuses to proceed if it does not.
+instance: instance-1
+platform: h100
+stack: vllm
+log_path: logs/instance-1.jsonl
+
+# Only the drafter lives here. The target checkpoint moves with the precision axis
+# below, because fp8 and w4a16 are properties of the weights on disk -- not runtime
+# flags -- so each precision is a different checkpoint of the same model.
+#
+# The drafter stays BF16 throughout: quantizing the draft model would add a second
+# precision variable to an experiment about the target's precision.
+model:
+  - draft_model: meta-llama/Llama-3.2-1B-Instruct
+
+prompts:
+  source: gsm8k
+  split: test
+  n: 250
+  seed: 0
+
+defaults:
+  max_tokens: 256
+  ignore_eos: true
+  temperature: 0.0
+  seed: 42
+  repeats: 5
+  warmup: 3
+  batch_size: 1
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.85
+
+axes:
+  # Grouped axis: target_dtype and target_model move together, one checkpoint per
+  # precision. VERIFY these three repo ids resolve before launching -- the runner reads
+  # back what vLLM actually loaded and refuses to record a BF16 run as fp8, so a wrong
+  # id here fails loudly at startup rather than silently in the results.
+  precision:
+    - {target_dtype: bf16,  target_model: meta-llama/Llama-3.1-8B-Instruct}
+    - {target_dtype: fp8,   target_model: RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8}
+    - {target_dtype: w4a16, target_model: RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w4a16}
+  spec:
+    - {spec_method: none, num_speculative_tokens: null}
+    - {spec_method: draft_model, num_speculative_tokens: 1}
+    - {spec_method: draft_model, num_speculative_tokens: 2}
+    - {spec_method: draft_model, num_speculative_tokens: 3}
+    - {spec_method: draft_model, num_speculative_tokens: 4}
+    - {spec_method: draft_model, num_speculative_tokens: 5}
+    - {spec_method: draft_model, num_speculative_tokens: 7}
+
+interleave: true

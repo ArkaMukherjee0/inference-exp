@@ -1,0 +1,36 @@
+# Smoke config -- the tiny end-to-end pipeline test.
+#
+# One small target, two conditions, 20 prompts, 1 repeat, max_tokens 32. Small enough to
+# finish in minutes, real enough that every record is a genuine measurement.
+instance: smoke
+platform: h100
+stack: vllm
+log_path: logs/smoke.jsonl
+
+model:
+  - target_model: meta-llama/Llama-3.2-1B-Instruct
+    draft_model: HuggingFaceTB/SmolLM2-135M-Instruct
+
+prompts:
+  source: gsm8k
+  split: test
+  n: 20
+  seed: 0
+
+defaults:
+  max_tokens: 32
+  ignore_eos: true
+  temperature: 0.0
+  seed: 42
+  repeats: 1
+  warmup: 1
+  batch_size: 1
+  target_dtype: bf16
+  gpu_memory_utilization: 0.80
+
+axes:
+  spec:
+    - {spec_method: none, num_speculative_tokens: null}
+    - {spec_method: draft_model, num_speculative_tokens: 4}
+
+interleave: true

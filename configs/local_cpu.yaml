@@ -1,0 +1,49 @@
+# Local CPU arm -- E6 (the platform curve).
+#
+# Core Ultra 7 270K Plus. num_threads is mandatory and pinned: on a hybrid P/E-core part
+# an unbounded thread count lets the scheduler migrate work between core types mid-run,
+# and the timings wander for reasons that have nothing to do with the model.
+#
+# Set num_threads to the P-core count, not the logical core count -- mixing P and E cores
+# in one inference pool measures the slowest core, not the machine.
+instance: local-cpu
+platform: cpu
+stack: llamacpp
+log_path: logs/local-cpu.jsonl
+
+model:
+  binary: llama-speculative
+  target_gguf: models/Llama-3.1-8B-Instruct-Q4_K_M.gguf
+  draft_gguf: models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+  target_model: Llama-3.1-8B-Instruct-Q4_K_M
+  draft_model: Llama-3.2-1B-Instruct-Q4_K_M
+
+prompts:
+  source: gsm8k
+  split: test
+  n: 250
+  seed: 0
+
+defaults:
+  max_tokens: 256
+  ignore_eos: true
+  temperature: 0.0
+  seed: 42
+  repeats: 5
+  warmup: 3
+  target_dtype: w4a16
+  batch_size: 1
+  num_threads: 8
+  gguf_quant: Q4_K_M
+
+axes:
+  spec:
+    - {spec_method: none, num_speculative_tokens: null}
+    - {spec_method: draft_model, num_speculative_tokens: 1}
+    - {spec_method: draft_model, num_speculative_tokens: 2}
+    - {spec_method: draft_model, num_speculative_tokens: 3}
+    - {spec_method: draft_model, num_speculative_tokens: 4}
+    - {spec_method: draft_model, num_speculative_tokens: 5}
+    - {spec_method: draft_model, num_speculative_tokens: 7}
+
+interleave: true

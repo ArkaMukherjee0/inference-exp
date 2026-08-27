@@ -1,1 +1,12 @@
+# Documents (per request)
 implementation.md
+methodology.md
+design.md
+experiments.md
+
+# Generated outputs
+logs/
+report/
+__pycache__/
+*.py[cod]
+.pytest_cache/

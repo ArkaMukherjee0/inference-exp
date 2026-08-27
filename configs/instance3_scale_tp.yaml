@@ -1,0 +1,42 @@
+# Instance 3 -- E5 (scale and tensor parallelism).
+#
+# The nccl_p2p_disabled arm isolates how much of the TP effect is interconnect rather
+# than arithmetic. It is a real measurement condition, not a debugging flag, so it lives
+# on an axis and is recorded per record.
+instance: instance-3
+platform: h100
+stack: vllm
+log_path: logs/instance-3.jsonl
+
+model:
+  - target_model: meta-llama/Llama-3.1-8B-Instruct
+    draft_model: meta-llama/Llama-3.2-1B-Instruct
+
+prompts:
+  source: gsm8k
+  split: test
+  n: 250
+  seed: 0
+
+defaults:
+  max_tokens: 256
+  ignore_eos: true
+  temperature: 0.0
+  seed: 42
+  repeats: 5
+  warmup: 3
+  target_dtype: bf16
+  batch_size: 1
+  gpu_memory_utilization: 0.85
+
+axes:
+  parallelism:
+    - {tensor_parallel_size: 1, draft_tensor_parallel_size: 1, nccl_p2p_disabled: false}
+    - {tensor_parallel_size: 2, draft_tensor_parallel_size: 1, nccl_p2p_disabled: false}
+    - {tensor_parallel_size: 2, draft_tensor_parallel_size: 2, nccl_p2p_disabled: false}
+    - {tensor_parallel_size: 2, draft_tensor_parallel_size: 1, nccl_p2p_disabled: true}
+  spec:
+    - {spec_method: none, num_speculative_tokens: null}
+    - {spec_method: draft_model, num_speculative_tokens: 4}
+
+interleave: true
