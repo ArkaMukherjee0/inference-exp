@@ -515,11 +515,24 @@ class VLLMRunner:
         _cuda_sync()
         total_ms = (time.perf_counter() - t0) * 1000.0
 
-        self._accept_capture = self._capture_acceptance()
         target = self._match_target(outputs, prompt)
 
-        # TTFT last, on a matched single-token request. See _measure_ttft_ms.
+        # TTFT last, on a matched single-token request (see _measure_ttft_ms) -- and it
+        # doubles as the flush for the measured request's final iteration.
+        #
+        # The lag cuts both ways. Reading the collector the instant generate() returns
+        # misses that last iteration, because its stats are delivered on the *next*
+        # engine activity; the earlier version failed with "9 iterations but tokens imply
+        # 10". Any subsequent engine call releases it, so the probe is run first and the
+        # collector read afterwards. The probe caps at one token, so it can contribute at
+        # most one iteration of its own -- and that one lags in turn, landing after this
+        # read rather than in it.
+        #
+        # This is a claim about vLLM's delivery timing, not an assumption we rely on: the
+        # iteration cross-check in _acceptance compares the engine's own count against
+        # the count implied by tokens emitted, and raises if they disagree by even one.
         ttft_ms = self._measure_ttft_ms(batch)
+        self._accept_capture = self._capture_acceptance()
         return self._to_result(target, wall_ttft_ms=ttft_ms, wall_total_ms=total_ms)
 
     def _capture_acceptance(self) -> dict[str, Any] | None:

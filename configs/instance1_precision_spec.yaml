@@ -56,4 +56,11 @@ axes:
     - {spec_method: draft_model, num_speculative_tokens: 3}
     - {spec_method: draft_model, num_speculative_tokens: 4}
 
+# Insurance, not a preference. If this vLLM build's acceptance statistics still cannot
+# be reconciled with the tokens emitted, speculative records are written speed-valid and
+# acceptance-null, stamped acceptance_unavailable, rather than the sweep dying overnight.
+# Figures 01/02/03/05 are unaffected; 04 and 06 then come from the CPU arm, where
+# llama.cpp's per-step logging works. A histogram is never invented either way.
+allow_missing_acceptance: true
+
 interleave: true
