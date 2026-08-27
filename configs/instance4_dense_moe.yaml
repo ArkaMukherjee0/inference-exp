@@ -1,0 +1,82 @@
+# Instance 4 -- E8 (axis K: does gamma buy more on a sparse model than a dense one?).
+#
+# Figure 08 plots speedup against gamma, normalized to gamma=1 within each architecture,
+# and reads the *slope*. That needs a gamma sweep on both a dense and an MoE target --
+# which no other config provides: instance-1's gamma sweep is Llama-only (dense), and
+# instance-2 pins gamma to sweep batch size instead. Hence a config of its own.
+#
+# Model pair, and why this one:
+#
+#   dense  microsoft/Phi-3.5-mini-instruct   Phi3ForCausalLM,   3.8B dense
+#   MoE    microsoft/Phi-mini-MoE-instruct   PhiMoEForCausalLM, 16 experts, top-2
+#
+# Same family, same tokenizer (vocab 32064 on both, checked against config.json rather
+# than assumed), same precision, same drafting mechanism. Architecture is then the only
+# thing that differs between the two arms, which is the whole requirement for a figure
+# whose measurement is the difference in slope.
+#
+# Do NOT substitute Gemma 4 E4B here. Its config carries enable_moe_block: false and
+# num_experts: null -- the "E" is effective parameters, not experts -- so it is a dense
+# model, and using it would make figure 08 a dense-vs-dense plot wearing an MoE label.
+# The genuine MoE in that family is gemma-4-26B-A4B-it (128 experts, top-8) at 51.6 GB,
+# which does not fit the disk on this box.
+stack: vllm
+platform: h100
+instance: instance-4
+log_path: logs/instance-4.jsonl
+
+# spec_method: ngram draws its draft from the prompt itself, so there is no draft
+# checkpoint here and none is needed.
+#
+# This is a deliberate choice, not a shortcut. A draft-model arm would need a small
+# checkpoint sharing the Phi-3 tokenizer, and none exists: every small Llama-family
+# drafter is vocab 32000 against Phi's 32064, which vLLM rejects outright, and the only
+# 32064 models are the 3.8B Phi-3 dense checkpoints -- 7.6 GB drafting for a 15.3 GB
+# target, c ~= 0.5, where speculation cannot win regardless of architecture. Worse, the
+# dense arm cannot draft with a copy of itself, so the two arms would end up on different
+# drafters and the slope difference would no longer be attributable to architecture.
+#
+# Prompt-lookup gives both arms the identical drafting mechanism at identical drafting
+# cost (c ~= 0, it is a string match), which is what isolates the architecture effect.
+# The cost is that alpha is lower than a trained drafter's and depends on how repetitive
+# GSM8K prompts are -- fine here, because figure 08 reads the slope within an arm and
+# compares slopes between arms, never the absolute level.
+model:
+  - target_model: microsoft/Phi-3.5-mini-instruct
+  - target_model: microsoft/Phi-mini-MoE-instruct
+
+prompts:
+  source: gsm8k
+  split: test
+  n: 80
+  seed: 0
+  # The same deterministic 80-prompt prefix instance-1 uses, so the two logs score the
+  # identical examples and figure 08's arms stay comparable with figure 04's.
+  allow_partial: true
+
+defaults:
+  max_tokens: 256
+  ignore_eos: true
+  temperature: 0.0
+  seed: 42
+  repeats: 3
+  warmup: 3
+  batch_size: 1
+  tensor_parallel_size: 1
+  target_dtype: bf16
+  gpu_memory_utilization: 0.85
+
+axes:
+  # Same gamma ladder as instance-1, so the dense-vs-MoE slopes are read off the same
+  # x positions as the precision sweep's.
+  spec:
+    - {spec_method: none, num_speculative_tokens: null}
+    - {spec_method: ngram, num_speculative_tokens: 1}
+    - {spec_method: ngram, num_speculative_tokens: 2}
+    - {spec_method: ngram, num_speculative_tokens: 3}
+    - {spec_method: ngram, num_speculative_tokens: 4}
+    - {spec_method: ngram, num_speculative_tokens: 5}
+    - {spec_method: ngram, num_speculative_tokens: 7}
+    - {spec_method: ngram, num_speculative_tokens: 10}
+
+interleave: true

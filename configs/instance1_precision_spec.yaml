@@ -49,12 +49,22 @@ axes:
     - {target_dtype: bf16,  target_model: meta-llama/Llama-3.1-8B-Instruct}
     - {target_dtype: fp8,   target_model: RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8}
     - {target_dtype: w4a16, target_model: RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w4a16}
+  # The gamma range has to bracket the optimum, not stop short of it. Acceptance measured
+  # on this exact pair (Llama-3.1-8B target, Llama-3.2-1B draft) is alpha ~= 0.92 at
+  # gamma=1 and ~= 0.88 at gamma=2; feeding that to analysis.model.optimal_gamma gives a
+  # predicted optimum of 7-10 for any plausible c in [0.10, 0.20]. A sweep that stopped at
+  # gamma=4 would sit entirely on the rising limb, and E2 -- which exists to locate the
+  # turnover and compare it against the analytical prediction -- would have nothing to
+  # locate. Figure 04 needs points on both sides of the peak.
   spec:
     - {spec_method: none, num_speculative_tokens: null}
     - {spec_method: draft_model, num_speculative_tokens: 1}
     - {spec_method: draft_model, num_speculative_tokens: 2}
     - {spec_method: draft_model, num_speculative_tokens: 3}
     - {spec_method: draft_model, num_speculative_tokens: 4}
+    - {spec_method: draft_model, num_speculative_tokens: 5}
+    - {spec_method: draft_model, num_speculative_tokens: 7}
+    - {spec_method: draft_model, num_speculative_tokens: 10}
 
 # Insurance, not a preference. If this vLLM build's acceptance statistics still cannot
 # be reconciled with the tokens emitted, speculative records are written speed-valid and

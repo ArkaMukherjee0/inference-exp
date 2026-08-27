@@ -1,0 +1,2 @@
+usage: run_sweep.py [-h] --config CONFIG [--dry-run] [--allow-shared-gpu]
+run_sweep.py: error: unrecognized arguments: logs/instance-1.console.log

@@ -501,3 +501,73 @@ def test_consistent_counts_reconcile():
     assert accepted == 24
     assert sum(hist) == 32 - accepted == 8
     assert proposed == 4 * 8
+
+
+# -- the engine's own step count -------------------------------------------------------
+#
+# vLLM's counters do not satisfy steps == output_tokens - accepted, for two reasons that
+# compound: the first decode token after prefill is undrafted and belongs to no
+# verification step, and the scheduler observes a step's acceptance before the output
+# processor clips it to max_tokens. Deriving the step count from output_tokens therefore
+# lands between one and gamma steps out. num_drafts is the count, so it is used directly.
+
+
+def test_engine_step_count_is_preferred_over_the_derived_one():
+    """The exact case from the smoke run: 32 tokens, 22 accepted, 9 steps."""
+    per_pos = [9, 6, 4, 3]                       # 22 accepted over 9 steps
+    hist, proposed = VLLMRunner._hist_from_per_pos(per_pos, 4, output_tokens=32, steps=9)
+    assert sum(hist) == 9
+    assert sum(k * n for k, n in enumerate(hist)) == 22
+    assert hist[0] == 0
+    assert proposed == 4 * 9
+    # The derivation the old code used would have claimed ten steps and invented an
+    # empty-acceptance step that never ran.
+    derived, _ = VLLMRunner._hist_from_per_pos(per_pos, 4, output_tokens=32)
+    assert sum(derived) == 10 and derived[0] == 1
+
+
+def test_engine_step_count_below_the_accepting_steps_is_refused():
+    """steps < per_pos[0] means the two counters describe different work."""
+    with pytest.raises(RunnerError, match="describe different work"):
+        VLLMRunner._hist_from_per_pos([9, 6, 4, 3], 4, output_tokens=32, steps=7)
+
+
+def test_truncated_final_step_still_reconciles():
+    """max_tokens clips the last step's tokens; the counters still count them.
+
+    10 steps accepting 26 tokens plus the undrafted first token is 37 emitted, of which
+    max_tokens=32 keeps 32. The old equality check refused this outright.
+    """
+    hist, _ = VLLMRunner._hist_from_per_pos([10, 8, 5, 3], 4, output_tokens=32, steps=10)
+    assert sum(hist) == 10
+    assert sum(k * n for k, n in enumerate(hist)) == 26
+
+
+def _capture(per_pos, drafts):
+    return {"per_pos": per_pos, "num_drafts": drafts}
+
+
+def test_counters_within_reach_of_the_emitted_tokens_are_accepted():
+    runner = VLLMRunner(_gpu_config(spec_method="draft_model", num_speculative_tokens=4,
+                                    draft_model="org/d", max_tokens=32))
+    runner._check_against_output(_capture([9, 6, 4, 3], 9), gamma=4, output_tokens=32)
+
+
+def test_counters_beyond_reach_of_the_emitted_tokens_are_refused():
+    """Two requests' worth of acceptance on a batch-1 condition cannot be recorded."""
+    runner = VLLMRunner(_gpu_config(spec_method="draft_model", num_speculative_tokens=4,
+                                    draft_model="org/d", max_tokens=32))
+    with pytest.raises(RunnerError, match="leaked in"):
+        runner._check_against_output(_capture([18, 12, 8, 6], 18), gamma=4, output_tokens=32)
+
+
+def test_the_reconciliation_bound_scales_with_batch_size():
+    """The counters cover the whole batch, so the bound has to as well."""
+    leaky = _capture([18, 12, 8, 6], 18)
+    gpu = dict(spec_method="draft_model", num_speculative_tokens=4, draft_model="org/d",
+               max_tokens=32)
+    with pytest.raises(RunnerError, match="leaked in"):
+        VLLMRunner(_gpu_config(batch_size=1, **gpu))._check_against_output(
+            leaky, gamma=4, output_tokens=32)
+    VLLMRunner(_gpu_config(batch_size=4, **gpu))._check_against_output(
+        leaky, gamma=4, output_tokens=32)

@@ -494,17 +494,15 @@ class VLLMRunner:
                 f"got {len(fillers)}. Refusing to measure a smaller batch than configured."
             )
 
-        # Order matters, and it is not the obvious one.
+        # The measured generation runs first, against a freshly reset collector, and its
+        # acceptance is frozen the moment it returns. The TTFT probe runs afterwards, into
+        # a collector nobody reads again this call.
         #
-        # vLLM delivers SchedulerStats to the parent's stat loggers with a one-iteration
-        # lag, so a request's final iteration arrives during the *next* engine activity.
-        # With the TTFT probe running first, its tail landed after our reset and was
-        # attributed to the measurement -- inflating accepted tokens by roughly one gamma
-        # and producing counts that could not be reconciled with the tokens emitted.
-        #
-        # So the measured generation runs first against a freshly reset collector, its
-        # acceptance is captured immediately, and only then does the probe run. The
-        # probe's stats land in a collector nobody reads again this call.
+        # The probe has to come second because it is not acceptance-free: it caps at one
+        # token, but a prompt-lookup drafter proposes from the prompt on the very first
+        # decode step, so under spec_method='ngram' the probe does perform a verification
+        # step of its own. Capturing before it runs is what keeps that out of the
+        # measurement, for every spec method, without depending on which ones draft early.
         if self._collector is not None:
             self._collector.reset()
         self._spec_before = _spec_stats_snapshot(self._llm)
@@ -515,24 +513,11 @@ class VLLMRunner:
         _cuda_sync()
         total_ms = (time.perf_counter() - t0) * 1000.0
 
+        self._accept_capture = self._capture_acceptance()
         target = self._match_target(outputs, prompt)
 
-        # TTFT last, on a matched single-token request (see _measure_ttft_ms) -- and it
-        # doubles as the flush for the measured request's final iteration.
-        #
-        # The lag cuts both ways. Reading the collector the instant generate() returns
-        # misses that last iteration, because its stats are delivered on the *next*
-        # engine activity; the earlier version failed with "9 iterations but tokens imply
-        # 10". Any subsequent engine call releases it, so the probe is run first and the
-        # collector read afterwards. The probe caps at one token, so it can contribute at
-        # most one iteration of its own -- and that one lags in turn, landing after this
-        # read rather than in it.
-        #
-        # This is a claim about vLLM's delivery timing, not an assumption we rely on: the
-        # iteration cross-check in _acceptance compares the engine's own count against
-        # the count implied by tokens emitted, and raises if they disagree by even one.
+        # TTFT last, on a matched single-token request. See _measure_ttft_ms.
         ttft_ms = self._measure_ttft_ms(batch)
-        self._accept_capture = self._capture_acceptance()
         return self._to_result(target, wall_ttft_ms=ttft_ms, wall_total_ms=total_ms)
 
     def _capture_acceptance(self) -> dict[str, Any] | None:
@@ -541,9 +526,9 @@ class VLLMRunner:
             return None
         return {
             "per_pos": list(self._collector.per_pos),
+            "num_drafts": self._collector.num_drafts,
             "num_draft_tokens": self._collector.num_draft_tokens,
             "num_accepted_tokens": self._collector.num_accepted_tokens,
-            "iterations": self._collector.iterations,
         }
 
     def _measure_ttft_ms(self, batch: list[str]) -> float:
@@ -676,22 +661,10 @@ class VLLMRunner:
         capture = self._accept_capture
         if capture and capture["per_pos"]:
             hist, derived = self._hist_from_per_pos(
-                list(capture["per_pos"]), gamma, output_tokens
+                list(capture["per_pos"]), gamma, output_tokens,
+                steps=capture.get("num_drafts") or None,
             )
-            # Cross-check the engine's own step count against the one implied by the
-            # tokens emitted. A mismatch means stats from outside this request leaked in
-            # (or this request's tail did not arrive), and the histogram would be a
-            # different run's shape wearing this run's label.
-            steps = sum(hist)
-            iterations = capture.get("iterations") or 0
-            if iterations and iterations != steps:
-                raise RunnerError(
-                    f"engine reported {iterations} speculative iterations but the tokens "
-                    f"emitted imply {steps} verification steps (output_tokens="
-                    f"{output_tokens}, accepted={sum(k * n for k, n in enumerate(hist))}). "
-                    "Acceptance statistics from outside this request have leaked in, or "
-                    "its final iteration never arrived. Refusing to record."
-                )
+            self._check_against_output(capture, gamma=gamma, output_tokens=output_tokens)
             proposed = capture.get("num_draft_tokens") or None
             return hist, (proposed if proposed else derived)
 
@@ -727,7 +700,10 @@ class VLLMRunner:
                     "mid-measurement, so the difference is not this request's acceptance."
                 )
             if any(d > 0 for d in delta):
-                return self._hist_from_per_pos(delta, gamma, output_tokens)
+                drafts = int(after.get("num_drafts", 0)) - int(before.get("num_drafts", 0))
+                return self._hist_from_per_pos(
+                    delta, gamma, output_tokens, steps=drafts if drafts > 0 else None
+                )
 
         # V0: the spec-decode worker aggregated per step on the engine's stat logger.
         engine = getattr(self._llm, "llm_engine", None)
@@ -757,8 +733,46 @@ class VLLMRunner:
             "runners/vllm_runner.py::_acceptance rather than estimating acceptance."
         )
 
+    def _check_against_output(self, capture: dict[str, Any], *, gamma: int,
+                              output_tokens: int) -> None:
+        """Bound the engine's acceptance counters by the tokens actually emitted.
+
+        The two are related but not equal, so this is an inequality rather than the
+        equality an earlier version asserted. For each request in the batch:
+
+        * its ``D`` verification steps emitted ``D + accepted`` tokens -- one token the
+          target chose itself per step, plus whatever that step accepted;
+        * at least one further token came from the undrafted decode step that follows
+          prefill. vLLM builds no ``SpecDecodingStats`` for a step with no drafts
+          (``Scheduler.make_spec_decoding_stats`` returns None when ``num_draft_tokens``
+          is zero), so that token is emitted with no iteration recorded against it;
+        * the scheduler observes a step's acceptance *before* the output processor clips
+          the step to ``max_tokens``, so up to ``gamma`` counted tokens can be absent
+          from the completion.
+
+        Summing over a batch of ``B`` requests that each stop at the same cap gives
+        ``B * (output_tokens + gamma - 1) >= num_drafts + accepted``. Acceptance
+        belonging to some other request inflates both terms on the right at once, which
+        is the failure this is here to catch.
+        """
+        drafts = int(capture.get("num_drafts") or 0)
+        if not drafts:
+            return
+        accepted = sum(int(x) for x in capture["per_pos"][:gamma])
+        batch = max(1, int(self.config.batch_size))
+        ceiling = batch * (int(output_tokens) + gamma - 1)
+        if drafts + accepted > ceiling:
+            raise RunnerError(
+                f"engine reported {drafts} verification steps and {accepted} accepted "
+                f"tokens, which needs more than the {ceiling} decode tokens this "
+                f"condition can have emitted (output_tokens={output_tokens}, "
+                f"batch_size={batch}, gamma={gamma}). Acceptance statistics from outside "
+                "this request have leaked in. Refusing to record."
+            )
+
     @staticmethod
-    def _hist_from_per_pos(per_pos: list[int], gamma: int, output_tokens: int) -> tuple[list[int], int]:
+    def _hist_from_per_pos(per_pos: list[int], gamma: int, output_tokens: int,
+                           *, steps: int | None = None) -> tuple[list[int], int]:
         """Convert per-position acceptance counts into a run-length histogram.
 
         ``per_pos[i]`` is the number of steps in which the token drafted at position
@@ -766,12 +780,23 @@ class VLLMRunner:
         accepted if every earlier position was -- so ``per_pos`` is non-increasing and
         the number of steps with a run of exactly ``k`` is ``per_pos[k-1] - per_pos[k]``.
 
-        The zero-acceptance bin cannot be read off ``per_pos`` at all, but it is exactly
-        recoverable: every verification step emits precisely one token the target chose
-        itself, so ``steps == output_tokens - accepted_tokens``, and ``hist[0]`` is
-        whatever is left after the non-zero runs. Leaving that bin at zero instead would
-        bias ``mean_accept_length`` upward by exactly the steps that accepted nothing --
-        the worst-performing steps, silently deleted.
+        The zero-acceptance bin cannot be read off ``per_pos`` at all. Leaving it at zero
+        would bias ``mean_accept_length`` upward by exactly the steps that accepted
+        nothing -- the worst-performing steps, silently deleted -- so it is recovered from
+        the total number of verification steps, which comes from one of two places.
+
+        ``steps`` is the engine's own count when it reports one, and is preferred. vLLM
+        does: ``SpecDecodingStats.num_drafts`` is incremented once per request per
+        verification step, so it is the step count directly, with no inference from the
+        output length at all.
+
+        Without it, the count is derived on the convention every runner shares -- each
+        verification step emits precisely one token the target chose itself, so
+        ``steps == output_tokens - accepted_tokens``. That identity holds for a stack
+        whose counters cover exactly the tokens it returned (llama.cpp's do). It does not
+        hold for vLLM, which is why ``steps`` exists: vLLM's first decode token is
+        undrafted and belongs to no step, and its counters are taken before ``max_tokens``
+        truncation, so the derivation lands anywhere from one to ``gamma`` steps out.
         """
         if not per_pos:
             raise RunnerError("empty per-position acceptance counts")
@@ -789,14 +814,27 @@ class VLLMRunner:
             hist[k] = counts[k - 1] - higher
 
         accepted = sum(counts)
-        steps = int(output_tokens) - accepted
+        if steps is None:
+            derived_steps = int(output_tokens) - accepted
+            zero_bin = derived_steps - counts[0]
+            if derived_steps <= 0 or zero_bin < 0:
+                raise RunnerError(
+                    f"acceptance counts are inconsistent with the output length: "
+                    f"output_tokens={output_tokens}, accepted={accepted}, "
+                    f"steps={derived_steps}, steps_with_acceptance={counts[0]}. Refusing "
+                    "to record a histogram that cannot be reconciled with the tokens "
+                    "actually emitted."
+                )
+            hist[0] = zero_bin
+            return hist, gamma * derived_steps
+
+        steps = int(steps)
         zero_bin = steps - counts[0]
         if steps <= 0 or zero_bin < 0:
             raise RunnerError(
-                f"acceptance counts are inconsistent with the output length: "
-                f"output_tokens={output_tokens}, accepted={accepted}, steps={steps}, "
-                f"steps_with_acceptance={counts[0]}. Refusing to record a histogram that "
-                "cannot be reconciled with the tokens actually emitted."
+                f"the engine reported {steps} verification steps but {counts[0]} of them "
+                f"accepted at least one token. The step count and the per-position counts "
+                "describe different work; refusing to record a histogram built from both."
             )
         hist[0] = zero_bin
         return hist, gamma * steps

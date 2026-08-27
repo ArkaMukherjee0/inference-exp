@@ -142,6 +142,60 @@ def run_id_index(df: pd.DataFrame) -> dict[str, list[str]]:
     }
 
 
+def identity_appendix(df: pd.DataFrame, *, min_rate: float = 0.95) -> str:
+    """The §7.4 side-by-side: every speculative condition against its own baseline.
+
+    Speculative decoding is supposed to be distribution-preserving, and at temperature 0
+    that means byte-identical output. This is the check that says whether it was, and it
+    belongs in the report rather than in a test: a speedup measured against a baseline
+    the speculative arm does not reproduce is not a speedup, it is a different model.
+
+    A condition is matched to its baseline on every field except the speculative ones, so
+    a spec run is only ever compared against the non-speculative run of the *same* model,
+    precision, batch size and parallelism.
+    """
+    from evals.identity import compare_conditions, side_by_side
+
+    conds = condition_table(df)
+    match_on = [c for c in ("target_model", "target_dtype", "batch_size", "stack",
+                            "platform", "tensor_parallel_size", "draft_tensor_parallel_size",
+                            "nccl_p2p_disabled", "max_tokens", "temperature")
+                if c in conds.columns]
+
+    baselines = conds[conds["spec_method"] == "none"]
+    blocks: list[str] = ["# Byte-identity against baseline (§7.4)", ""]
+    if baselines.empty:
+        return "\n".join(blocks + ["No non-speculative baseline condition present."])
+
+    rates: list[str] = []
+    for _, cand in conds[conds["spec_method"] != "none"].iterrows():
+        peers = baselines
+        for col in match_on:
+            peers = peers[peers[col] == cand[col]]
+        if peers.empty:
+            blocks.append(f"- `{cand['condition_id']}`: no matching baseline; not compared.")
+            continue
+        base_id = peers.iloc[0]["condition_id"]
+        try:
+            report = compare_conditions(
+                df, condition_id=cand["condition_id"], baseline_condition_id=base_id
+            )
+        except ValueError as exc:
+            blocks.append(f"- `{cand['condition_id']}`: not compared ({exc}).")
+            continue
+        flag = "" if report.identity_rate >= min_rate else "  **BELOW THRESHOLD**"
+        rates.append(
+            f"| `{cand['condition_id']}` | {condition_label(cand)} | "
+            f"{report.identity_rate:.2%} | {report.n_identical}/{report.n_compared} |{flag}"
+        )
+        blocks.append("")
+        blocks.append(side_by_side(report))
+
+    summary = ["| condition | label | identity rate | identical/compared |",
+               "|---|---|---|---|", *rates, ""] if rates else []
+    return "\n".join(blocks[:2] + summary + blocks[2:])
+
+
 # --------------------------------------------------------------------------------------
 # Figures
 # --------------------------------------------------------------------------------------
@@ -199,6 +253,7 @@ def build(
     *,
     c: float | None = None,
     ridge_points: dict[str, float] | None = None,
+    perplexity: dict[str, Any] | None = None,
     architecture: dict[str, str] | None = None,
     score_quality: bool = True,
 ) -> dict[str, Any]:
@@ -220,12 +275,22 @@ def build(
     (outdir / "primary_table.md").write_text(to_markdown(table), encoding="utf-8")
 
     (outdir / "provenance_appendix.md").write_text(provenance_appendix(df), encoding="utf-8")
+    try:
+        (outdir / "identity_appendix.md").write_text(identity_appendix(df), encoding="utf-8")
+    except (ImportError, KeyError, ValueError) as exc:
+        # Reported as absent, never as passing. An identity check that did not run is
+        # not an identity check that succeeded.
+        (outdir / "identity_appendix.md").write_text(
+            f"# Byte-identity against baseline (§7.4)\n\nNOT RUN: {exc}\n", encoding="utf-8"
+        )
+        print(f"identity appendix unavailable ({exc}).")
     (outdir / "run_id_index.json").write_text(
         json.dumps(run_id_index(df), indent=2), encoding="utf-8"
     )
 
     figures = render_figures(
-        df, outdir, scored=scored, c=c, ridge_points=ridge_points, architecture=architecture
+        df, outdir, scored=scored, c=c, ridge_points=ridge_points,
+        perplexity=perplexity, architecture=architecture
     )
     (outdir / "figures.json").write_text(
         json.dumps({k: str(v) for k, v in figures.items()}, indent=2), encoding="utf-8"
@@ -271,6 +336,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="platform_key=path/to/host_micro.json, for figure 05")
     ap.add_argument("--architecture", nargs="*", default=None,
                     help="model=dense|moe, for figure 08")
+    ap.add_argument("--perplexity", nargs="*", default=None,
+                    help="target_dtype=path/to/ppl.json, for figure 07 "
+                         "(written by scripts.run_perplexity)")
     args = ap.parse_args(argv)
 
     ridge = None
@@ -279,9 +347,19 @@ def main(argv: list[str] | None = None) -> int:
 
         ridge = ridge_points_from_micro(dict(kv.split("=", 1) for kv in args.micro))
 
+    ppl = None
+    if args.perplexity:
+        from evals.perplexity import PPLResult
+
+        ppl = {}
+        for kv in args.perplexity:
+            dtype, path = kv.split("=", 1)
+            ppl[dtype] = PPLResult(**json.loads(Path(path).read_text(encoding="utf-8")))
+
     arch = dict(kv.split("=", 1) for kv in args.architecture) if args.architecture else None
 
-    out = build(args.logs, Path(args.outdir), c=args.c, ridge_points=ridge, architecture=arch)
+    out = build(args.logs, Path(args.outdir), c=args.c, ridge_points=ridge,
+                perplexity=ppl, architecture=arch)
     print(f"\n{out['n_records']} records -> {args.outdir}")
     for name, path in out["figures"].items():
         print(f"  {name}: {path}")
