@@ -56,7 +56,7 @@ _SPEC_TOTAL_FIELDS = ("num_accepted_tokens", "num_draft_tokens", "num_drafts")
 def _find_spec_stats(root: Any, depth: int = 0, seen: set[int] | None = None) -> Any:
     """Locate an object carrying cumulative per-position acceptance counts."""
     seen = seen if seen is not None else set()
-    if root is None or id(root) in seen or depth > 3:
+    if root is None or id(root) in seen or depth > 6:
         return None
     seen.add(id(root))
 
@@ -132,6 +132,90 @@ def _spec_stats_snapshot(llm: Any) -> dict[str, Any] | None:
     return snap or None
 
 
+class _AcceptanceCollector:
+    """Accumulates per-iteration SpecDecodingStats for one request.
+
+    vLLM V1 runs its scheduler in a separate process and surfaces speculative statistics
+    only as ``SchedulerStats.spec_decoding_stats``, handed to the parent's stat loggers
+    once per engine iteration. Two consequences shaped this class:
+
+    * ``last_scheduler_stats`` holds the **most recent iteration only** and is overwritten
+      every step, so it cannot be read after a request and cannot be differenced. It has
+      to be accumulated as it arrives.
+    * The built-in logging logger resets its own accumulation whenever it logs (roughly
+      every ten seconds), so borrowing that would silently lose part of a request.
+
+    So we register as an additional stat logger and keep our own totals, reset explicitly
+    at the start of each measured generation. At batch 1 with one request in flight, what
+    accumulates between reset and read is exactly that request's acceptance -- and the
+    reconciliation against ``output_tokens`` in ``_hist_from_per_pos`` is what catches it
+    if that ever stops being true.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.per_pos: list[int] = []
+        self.num_drafts = 0
+        self.num_draft_tokens = 0
+        self.num_accepted_tokens = 0
+        self.iterations = 0
+
+    # vLLM calls this once per engine iteration. The signature has varied across
+    # versions, so it accepts anything and reads what it recognizes.
+    def record(self, scheduler_stats: Any = None, iteration_stats: Any = None,
+               *args: Any, **kwargs: Any) -> None:
+        stats = getattr(scheduler_stats, "spec_decoding_stats", None)
+        if stats is None:
+            return
+        per_pos = getattr(stats, "num_accepted_tokens_per_pos", None)
+        if not per_pos:
+            return
+
+        self.iterations += 1
+        if len(per_pos) > len(self.per_pos):
+            self.per_pos.extend([0] * (len(per_pos) - len(self.per_pos)))
+        for i, count in enumerate(per_pos):
+            self.per_pos[i] += int(count)
+
+        for attr, field in (("num_drafts", "num_drafts"),
+                            ("num_draft_tokens", "num_draft_tokens"),
+                            ("num_accepted_tokens", "num_accepted_tokens")):
+            value = getattr(stats, field, None)
+            if isinstance(value, int):
+                setattr(self, attr, getattr(self, attr) + value)
+
+    # Everything below is the StatLoggerBase surface. We are a collector, not a logger,
+    # so these do nothing -- but they must exist or vLLM's manager will fail on us.
+    def log(self, *args: Any, **kwargs: Any) -> None:
+        return
+
+    def log_engine_initialized(self, *args: Any, **kwargs: Any) -> None:
+        return
+
+    def record_sleep_state(self, *args: Any, **kwargs: Any) -> None:
+        return
+
+
+def _attach_acceptance_collector(llm: Any) -> _AcceptanceCollector | None:
+    """Register a collector with the engine's stat-logger manager.
+
+    Returns None when no manager is reachable, in which case the caller falls back to
+    the other extraction strategies and ultimately raises rather than guessing.
+    """
+    engine = getattr(llm, "llm_engine", None)
+    manager = getattr(engine, "logger_manager", None)
+    if manager is None:
+        return None
+    loggers = getattr(manager, "stat_loggers", None)
+    if not isinstance(loggers, list):
+        return None
+    collector = _AcceptanceCollector()
+    loggers.append(collector)
+    return collector
+
+
 # Quantization methods vLLM may report for a 4-bit weight / 16-bit activation checkpoint.
 _W4A16_METHODS = frozenset({"awq", "awq_marlin", "gptq", "gptq_marlin", "compressed-tensors"})
 _FP8_METHODS = frozenset({"fp8", "compressed-tensors", "modelopt"})
@@ -154,6 +238,7 @@ class VLLMRunner:
         self._llm: Any = None
         self._sampling: Any = None
         self._spec_before: dict[str, Any] | None = None
+        self._collector: Any = None
         self._log_extra = log_extra or {}
 
     # -- lifecycle ------------------------------------------------------------------
@@ -217,6 +302,8 @@ class VLLMRunner:
             detokenize=True,
         )
         self._verify_resolution(requested_spec=spec)
+        if cfg.spec_method != "none":
+            self._collector = _attach_acceptance_collector(self._llm)
 
     def close(self) -> None:
         if self._llm is None:
@@ -409,8 +496,10 @@ class VLLMRunner:
         # TTFT first, on a matched single-token request. See _measure_ttft_ms.
         ttft_ms = self._measure_ttft_ms(batch)
 
-        # Snapshot cumulative acceptance AFTER the TTFT probe, so that probe's own
-        # drafting is not attributed to this measurement.
+        # Reset AFTER the TTFT probe, so that probe's own drafting is not attributed to
+        # this measurement.
+        if self._collector is not None:
+            self._collector.reset()
         self._spec_before = _spec_stats_snapshot(self._llm)
 
         _cuda_sync()
@@ -545,6 +634,16 @@ class VLLMRunner:
 
         gamma = int(self.config.num_speculative_tokens)
         tried: list[str] = []
+
+        # Preferred: our own accumulation of the per-iteration scheduler stats. This is
+        # the only path that sees every iteration of the request rather than the last.
+        tried.append("registered stat-logger collector (SpecDecodingStats)")
+        if self._collector is not None and self._collector.per_pos:
+            proposed = self._collector.num_draft_tokens or None
+            hist, derived = self._hist_from_per_pos(
+                list(self._collector.per_pos), gamma, output_tokens
+            )
+            return hist, (proposed if proposed else derived)
 
         # V1: per-request counts of tokens accepted at each speculative position.
         per_pos = getattr(out, "num_accepted_tokens_per_pos", None)

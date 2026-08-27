@@ -49,7 +49,7 @@ def _describe(value: object, limit: int = 220) -> str:
 def walk(obj: object, label: str, depth: int = 0, seen: set[int] | None = None) -> int:
     """Print every acceptance-shaped attribute reachable from obj. Returns hit count."""
     seen = seen if seen is not None else set()
-    if obj is None or id(obj) in seen or depth > 3:
+    if obj is None or id(obj) in seen or depth > 6:
         return 0
     seen.add(id(obj))
 
@@ -67,10 +67,14 @@ def walk(obj: object, label: str, depth: int = 0, seen: set[int] | None = None) 
         if _interesting(name):
             print(f"  [HIT] {label}.{name} = {_describe(value)}")
             hits += 1
+            # Keep descending: a matched name is often a container whose *contents* are
+            # the counts. Stopping here hid SpecDecodingLogging's internals.
+            if hasattr(value, "__dict__"):
+                hits += walk(value, f"{label}.{name}", depth + 1, seen)
         # Descend into containers too. vLLM V1 keeps stat loggers in a dict, and the
         # EngineCore process boundary means those loggers are the only thing in this
         # process that ever sees acceptance counts.
-        elif depth < 3:
+        elif depth < 6:
             if isinstance(value, dict):
                 for key, item in list(value.items())[:8]:
                     hits += walk(item, f"{label}.{name}[{key!r}]", depth + 1, seen)

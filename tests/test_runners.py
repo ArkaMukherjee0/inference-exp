@@ -407,3 +407,78 @@ def test_engine_env_vars_are_captured_as_provenance():
     source = inspect.getsource(env.capture_env)
     assert "engine_env" in source
     assert "VLLM_" in source
+
+
+# -- acceptance collector --------------------------------------------------------------
+
+
+class _FakeSpecStats:
+    def __init__(self, per_pos, drafts=1, draft_tokens=4, accepted=None):
+        self.num_accepted_tokens_per_pos = per_pos
+        self.num_drafts = drafts
+        self.num_draft_tokens = draft_tokens
+        self.num_accepted_tokens = accepted if accepted is not None else sum(per_pos)
+
+
+class _FakeSchedulerStats:
+    def __init__(self, spec):
+        self.spec_decoding_stats = spec
+
+
+def test_collector_accumulates_across_iterations():
+    """vLLM reports one iteration at a time and overwrites; the request is the sum."""
+    from runners.vllm_runner import _AcceptanceCollector
+
+    c = _AcceptanceCollector()
+    c.record(_FakeSchedulerStats(_FakeSpecStats([1, 1, 1, 1])))
+    c.record(_FakeSchedulerStats(_FakeSpecStats([1, 1, 0, 0])))
+    c.record(_FakeSchedulerStats(_FakeSpecStats([1, 0, 0, 0])))
+
+    assert c.per_pos == [3, 2, 1, 1]
+    assert c.num_accepted_tokens == 4 + 2 + 1
+    assert c.num_draft_tokens == 12
+    assert c.iterations == 3
+
+
+def test_collector_reset_discards_the_ttft_probe():
+    """The TTFT probe drafts too; its acceptance must not land on the measurement."""
+    from runners.vllm_runner import _AcceptanceCollector
+
+    c = _AcceptanceCollector()
+    c.record(_FakeSchedulerStats(_FakeSpecStats([1, 1, 1, 1])))
+    c.reset()
+    c.record(_FakeSchedulerStats(_FakeSpecStats([1, 1, 0, 0])))
+    assert c.per_pos == [1, 1, 0, 0]
+    assert c.iterations == 1
+
+
+def test_collector_ignores_iterations_without_speculation():
+    from runners.vllm_runner import _AcceptanceCollector
+
+    c = _AcceptanceCollector()
+    c.record(_FakeSchedulerStats(None))
+    c.record(None)
+    c.record(_FakeSchedulerStats(_FakeSpecStats([])))
+    assert c.per_pos == []
+    assert c.iterations == 0
+
+
+def test_collector_survives_a_widening_position_vector():
+    from runners.vllm_runner import _AcceptanceCollector
+
+    c = _AcceptanceCollector()
+    c.record(_FakeSchedulerStats(_FakeSpecStats([2, 1])))
+    c.record(_FakeSchedulerStats(_FakeSpecStats([1, 1, 1, 1])))
+    assert c.per_pos == [3, 2, 1, 1]
+
+
+def test_collector_implements_the_stat_logger_surface():
+    """vLLM's manager calls these on every registered logger; missing one breaks the run."""
+    from runners.vllm_runner import _AcceptanceCollector
+
+    c = _AcceptanceCollector()
+    for method in ("record", "log", "log_engine_initialized", "record_sleep_state"):
+        assert callable(getattr(c, method))
+    c.log()
+    c.log_engine_initialized()
+    c.record_sleep_state()
