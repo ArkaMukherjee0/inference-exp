@@ -482,3 +482,22 @@ def test_collector_implements_the_stat_logger_surface():
     c.log()
     c.log_engine_initialized()
     c.record_sleep_state()
+
+
+def test_leaked_acceptance_stats_are_refused():
+    """A one-gamma over-count is exactly what a leaked TTFT probe looks like.
+
+    32 tokens at gamma=4 needs at least 7 verification steps, because a step emits at
+    most gamma+1. Counts implying 4 steps describe a different run.
+    """
+    with pytest.raises(RunnerError, match="inconsistent with the output length"):
+        VLLMRunner._hist_from_per_pos([7, 7, 7, 7], 4, output_tokens=32)
+
+
+def test_consistent_counts_reconcile():
+    """The same shape, with the probe's contribution removed, must pass."""
+    hist, proposed = VLLMRunner._hist_from_per_pos([7, 6, 6, 5], 4, output_tokens=32)
+    accepted = sum(k * n for k, n in enumerate(hist))
+    assert accepted == 24
+    assert sum(hist) == 32 - accepted == 8
+    assert proposed == 4 * 8

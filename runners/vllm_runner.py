@@ -239,6 +239,7 @@ class VLLMRunner:
         self._sampling: Any = None
         self._spec_before: dict[str, Any] | None = None
         self._collector: Any = None
+        self._accept_capture: dict[str, Any] | None = None
         self._log_extra = log_extra or {}
 
     # -- lifecycle ------------------------------------------------------------------
@@ -493,11 +494,17 @@ class VLLMRunner:
                 f"got {len(fillers)}. Refusing to measure a smaller batch than configured."
             )
 
-        # TTFT first, on a matched single-token request. See _measure_ttft_ms.
-        ttft_ms = self._measure_ttft_ms(batch)
-
-        # Reset AFTER the TTFT probe, so that probe's own drafting is not attributed to
-        # this measurement.
+        # Order matters, and it is not the obvious one.
+        #
+        # vLLM delivers SchedulerStats to the parent's stat loggers with a one-iteration
+        # lag, so a request's final iteration arrives during the *next* engine activity.
+        # With the TTFT probe running first, its tail landed after our reset and was
+        # attributed to the measurement -- inflating accepted tokens by roughly one gamma
+        # and producing counts that could not be reconciled with the tokens emitted.
+        #
+        # So the measured generation runs first against a freshly reset collector, its
+        # acceptance is captured immediately, and only then does the probe run. The
+        # probe's stats land in a collector nobody reads again this call.
         if self._collector is not None:
             self._collector.reset()
         self._spec_before = _spec_stats_snapshot(self._llm)
@@ -508,8 +515,23 @@ class VLLMRunner:
         _cuda_sync()
         total_ms = (time.perf_counter() - t0) * 1000.0
 
+        self._accept_capture = self._capture_acceptance()
         target = self._match_target(outputs, prompt)
+
+        # TTFT last, on a matched single-token request. See _measure_ttft_ms.
+        ttft_ms = self._measure_ttft_ms(batch)
         return self._to_result(target, wall_ttft_ms=ttft_ms, wall_total_ms=total_ms)
+
+    def _capture_acceptance(self) -> dict[str, Any] | None:
+        """Freeze the collector's totals the instant the measured request finishes."""
+        if self._collector is None or not self._collector.per_pos:
+            return None
+        return {
+            "per_pos": list(self._collector.per_pos),
+            "num_draft_tokens": self._collector.num_draft_tokens,
+            "num_accepted_tokens": self._collector.num_accepted_tokens,
+            "iterations": self._collector.iterations,
+        }
 
     def _measure_ttft_ms(self, batch: list[str]) -> float:
         """Time-to-first-token, measured as a separate one-token request.
@@ -638,11 +660,26 @@ class VLLMRunner:
         # Preferred: our own accumulation of the per-iteration scheduler stats. This is
         # the only path that sees every iteration of the request rather than the last.
         tried.append("registered stat-logger collector (SpecDecodingStats)")
-        if self._collector is not None and self._collector.per_pos:
-            proposed = self._collector.num_draft_tokens or None
+        capture = self._accept_capture
+        if capture and capture["per_pos"]:
             hist, derived = self._hist_from_per_pos(
-                list(self._collector.per_pos), gamma, output_tokens
+                list(capture["per_pos"]), gamma, output_tokens
             )
+            # Cross-check the engine's own step count against the one implied by the
+            # tokens emitted. A mismatch means stats from outside this request leaked in
+            # (or this request's tail did not arrive), and the histogram would be a
+            # different run's shape wearing this run's label.
+            steps = sum(hist)
+            iterations = capture.get("iterations") or 0
+            if iterations and iterations != steps:
+                raise RunnerError(
+                    f"engine reported {iterations} speculative iterations but the tokens "
+                    f"emitted imply {steps} verification steps (output_tokens="
+                    f"{output_tokens}, accepted={sum(k * n for k, n in enumerate(hist))}). "
+                    "Acceptance statistics from outside this request have leaked in, or "
+                    "its final iteration never arrived. Refusing to record."
+                )
+            proposed = capture.get("num_draft_tokens") or None
             return hist, (proposed if proposed else derived)
 
         # V1: per-request counts of tokens accepted at each speculative position.
