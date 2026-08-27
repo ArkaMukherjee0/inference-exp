@@ -127,6 +127,11 @@ def build_record(
 
     if not latency_valid:
         rec["latency_valid"] = False
+    # How the timings were obtained is provenance, not detail: an engine-metrics record
+    # and a wall-clock record measure subtly different spans, and mixing them silently
+    # would put two definitions of ttft_ms in one column.
+    if result.extra.get("timing_method"):
+        rec["timing_method"] = str(result.extra["timing_method"])
     if resolved:
         rec["resolved_spec_config"] = _stringify(resolved.get("speculative_config"))
         if resolved.get("model_path"):

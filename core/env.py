@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
 from importlib import metadata
+from pathlib import Path
 from typing import Any
 
 _NVIDIA_SMI_TIMEOUT_S = 15
@@ -222,14 +224,49 @@ def stack_version(stack: str, *, llamacpp_binary: str | None = None) -> str:
     if stack == "llamacpp":
         if not llamacpp_binary:
             raise RuntimeError("stack='llamacpp' requires the binary path to read its version.")
-        out = _run([llamacpp_binary, "--version"], timeout=30)
-        if not out:
+        # llama.cpp prints its version banner to *stderr*, and some builds exit non-zero
+        # after doing so. Reading only stdout, or requiring a zero exit, throws away the
+        # answer -- and this function raising is what stops the whole CPU arm.
+        version = _llamacpp_version(llamacpp_binary)
+        if not version:
             raise RuntimeError(
                 f"could not read a version from {llamacpp_binary!r}. llama.cpp builds vary; "
                 "refusing to record a measurement from an unidentifiable binary."
             )
-        return f"llamacpp:{out.splitlines()[0].strip()}"
+        return f"llamacpp:{version}"
     raise ValueError(f"unknown stack {stack!r}")
+
+
+_RE_LLAMACPP_VERSION = re.compile(r"version:\s*(.+)", re.IGNORECASE)
+
+
+def _llamacpp_version(binary: str) -> str | None:
+    """The build identity of a llama.cpp binary, from either output stream.
+
+    Deliberately does not use ``check=True``: the version banner goes to stderr and a
+    non-zero exit after printing it is common. What matters is that a build string was
+    found, not how the process felt about being asked.
+    """
+    exe = shutil.which(binary) or (binary if Path(binary).is_file() else None)
+    if exe is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, "--version"], capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    blob = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+    match = _RE_LLAMACPP_VERSION.search(blob)
+    if match:
+        return match.group(1).strip()
+    # No "version:" line, but the process said something -- keep its first real line
+    # rather than discarding an identity we did manage to obtain.
+    for line in blob.splitlines():
+        if line.strip():
+            return line.strip()
+    return None
 
 
 def driver_string(platform_name: str) -> str:

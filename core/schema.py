@@ -173,6 +173,7 @@ REQUIRED_FIELDS: Final[list[str]] = [
 # rejected: unknown keys are how schema drift between parallel agents starts.
 OPTIONAL_FIELDS: Final[frozenset[str]] = frozenset({
     "latency_valid",          # WP4: False on every HF record; gates all speed figures
+    "timing_method",          # how ttft/total were obtained; see runners/vllm_runner.py
     "resolved_spec_config",   # WP2: what the engine actually resolved our request to
     "resolved_model_path",    # guard against silent model substitution
     "gpu_memory_utilization",
@@ -275,6 +276,8 @@ def validate_record(rec: dict) -> None:
         _require_type(rec, key, (bool,))
     if "latency_valid" in rec:
         _require_type(rec, "latency_valid", (bool,))
+    if "timing_method" in rec:
+        _require_type(rec, "timing_method", (str,))
 
     # -- integers --------------------------------------------------------------------
     for key in ("tensor_parallel_size", "draft_tensor_parallel_size", "batch_size",

@@ -20,10 +20,27 @@ There is no fallback path in this file. Every failure raises.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from core.schema import RunConfig
 from runners.base import GenResult, RunnerError
+
+
+def _cuda_sync() -> None:
+    """Block until queued GPU work has actually finished.
+
+    perf_counter around an async submission measures the submission. Every wall-clock
+    boundary in this runner is fenced with this.
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except ImportError:
+        pass
+
 
 # Quantization methods vLLM may report for a 4-bit weight / 16-bit activation checkpoint.
 _W4A16_METHODS = frozenset({"awq", "awq_marlin", "gptq", "gptq_marlin", "compressed-tensors"})
@@ -292,9 +309,58 @@ class VLLMRunner:
                 f"got {len(fillers)}. Refusing to measure a smaller batch than configured."
             )
 
+        # TTFT first, on a matched single-token request. See _measure_ttft_ms.
+        ttft_ms = self._measure_ttft_ms(batch)
+
+        _cuda_sync()
+        t0 = time.perf_counter()
         outputs = self._llm.generate(batch, self._sampling, use_tqdm=False)
+        _cuda_sync()
+        total_ms = (time.perf_counter() - t0) * 1000.0
+
         target = self._match_target(outputs, prompt)
-        return self._to_result(target)
+        return self._to_result(target, wall_ttft_ms=ttft_ms, wall_total_ms=total_ms)
+
+    def _measure_ttft_ms(self, batch: list[str]) -> float:
+        """Time-to-first-token, measured as a separate one-token request.
+
+        vLLM's V1 offline ``LLM`` API does not populate per-token timestamps --
+        ``RequestOutput.metrics`` comes back with ``first_token_time=None`` and
+        ``finished_time=None`` -- so submit-to-first-token cannot be read off the full
+        generation. The alternatives were:
+
+        * the async streaming engine, which does expose real per-token timing but would
+          make every measurement depend on an event loop and a different code path from
+          the one the study is about;
+        * dropping TTFT, which is not available: ``tpot_ms`` is *defined* as
+          ``(total_ms - ttft_ms) / (output_tokens - 1)``, so without TTFT the primary
+          metric of the whole study cannot be computed.
+
+        So TTFT is measured by submitting the identical batch with ``max_tokens=1`` and
+        timing it end to end. That request performs exactly the work TTFT names: prefill
+        plus one decode step. Prefix caching is disabled, so the full generation that
+        follows redoes prefill identically rather than reusing this one's KV cache.
+
+        Two honest caveats, recorded with every record via ``timing_method``:
+        it is a *matched* request rather than the same request, and both measurements
+        include the same fixed Python-side submission overhead -- which largely cancels
+        in the subtraction that produces ``tpot_ms``.
+        """
+        from vllm import SamplingParams
+
+        one_token = SamplingParams(
+            temperature=self.config.temperature,
+            max_tokens=1,
+            ignore_eos=self.config.ignore_eos,
+            seed=self.config.seed,
+            logprobs=None,
+            detokenize=True,
+        )
+        _cuda_sync()
+        t0 = time.perf_counter()
+        self._llm.generate(batch, one_token, use_tqdm=False)
+        _cuda_sync()
+        return (time.perf_counter() - t0) * 1000.0
 
     @staticmethod
     def _match_target(outputs: list[Any], prompt: str) -> Any:
@@ -308,22 +374,31 @@ class VLLMRunner:
                 return out
         raise RunnerError("target prompt not found in vLLM's returned outputs.")
 
-    def _to_result(self, out: Any) -> GenResult:
+    def _to_result(self, out: Any, *, wall_ttft_ms: float, wall_total_ms: float) -> GenResult:
+        # Prefer the engine's own per-token timestamps when a build populates them: they
+        # exclude our submission overhead and are the better measurement. vLLM V1 leaves
+        # them None, in which case we fall back to the wall-clock pair from generate().
+        # Which one was used is recorded per record, because two records timed different
+        # ways are not interchangeable.
+        timing_method = "engine_metrics"
         metrics = getattr(out, "metrics", None)
-        if metrics is None:
-            raise RunnerError(
-                "RequestOutput.metrics is None, so time-to-first-token cannot be measured. "
-                "Enable request metrics (disable_log_stats=False, and on vLLM V1 set "
-                "VLLM_USE_V1=0 or run the engine in a mode that populates metrics). "
-                "Refusing to record a run with no TTFT."
-            )
         arrival = getattr(metrics, "arrival_time", None)
         first_token = getattr(metrics, "first_token_time", None)
         finished = getattr(metrics, "finished_time", None)
-        if arrival is None or first_token is None or finished is None:
+
+        if arrival is not None and first_token is not None and finished is not None:
+            ttft_ms = (first_token - arrival) * 1000.0
+            total_ms = (finished - arrival) * 1000.0
+        else:
+            timing_method = "wall_clock_matched_ttft"
+            ttft_ms = wall_ttft_ms
+            total_ms = wall_total_ms
+
+        if total_ms <= ttft_ms:
             raise RunnerError(
-                f"incomplete request metrics (arrival={arrival}, first_token={first_token}, "
-                f"finished={finished}); cannot derive ttft_ms/total_ms."
+                f"total_ms ({total_ms:.3f}) <= ttft_ms ({ttft_ms:.3f}) via {timing_method}. "
+                "The full generation was not slower than a single token, which means the "
+                "two measurements are not describing the work they claim to."
             )
 
         completion = out.outputs[0]
@@ -333,14 +408,17 @@ class VLLMRunner:
 
         hist, proposed = self._acceptance(out, output_tokens=len(token_ids))
         return GenResult(
-            ttft_ms=(first_token - arrival) * 1000.0,
-            total_ms=(finished - arrival) * 1000.0,
+            ttft_ms=ttft_ms,
+            total_ms=total_ms,
             output_tokens=len(token_ids),
             output_text=completion.text,
             prompt_tokens=len(getattr(out, "prompt_token_ids", []) or []),
             accept_length_histogram=hist,
             draft_tokens_proposed=proposed,
-            extra={"finish_reason": getattr(completion, "finish_reason", None)},
+            extra={
+                "finish_reason": getattr(completion, "finish_reason", None),
+                "timing_method": timing_method,
+            },
         )
 
     # -- acceptance extraction -------------------------------------------------------

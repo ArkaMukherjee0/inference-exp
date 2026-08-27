@@ -1,0 +1,61 @@
+# CPU smoke -- the llama.cpp arm end to end, in minutes rather than days.
+#
+# Same binaries, same flags, same GGUFs as local_cpu.yaml: a smoke run that swapped any
+# of those would prove nothing about the run that matters. Only the sizes shrink.
+#
+# This is a PIPELINE test. Its numbers are not results: 8 prompts and a single repeat
+# cannot support a confidence interval, and allow_partial marks the records accordingly.
+instance: local-cpu-smoke
+platform: cpu
+stack: llamacpp
+log_path: logs/local-cpu-smoke.jsonl
+
+model:
+  # llama.cpp b10655, built from source with per-step acceptance logging added to
+  # examples/speculative (patches/llamacpp-b10655-per-step-accept.patch). The stock
+  # release archives ship no speculative binary at all, and the stock example prints
+  # only aggregate acceptance -- no accepted-run-length distribution.
+  binary: 'C:\tools\llama.cpp-src\build\bin\llama-speculative.exe'
+  # The speculative example requires a draft model, so it cannot measure the
+  # non-speculative baseline. Same build, same flags -- a baseline from a different
+  # build would put the build difference into the speedup.
+  baseline_binary: 'C:\tools\llama.cpp-src\build\bin\llama-completion.exe'
+  # -c: the default context is the model's full 131072 tokens, which asks for a 16 GiB
+  # KV cache and fails to allocate before a single token is generated.
+  extra_args: ['-c', '4096']
+  # llama-completion turns on conversation mode for any model with a chat template,
+  # which would wrap every prompt and block on stdin. The speculative example has no
+  # such mode and rejects the flag, so it is baseline-only.
+  baseline_extra_args: ['-no-cnv']
+  target_gguf: 'C:\models\lmstudio-community\Meta-Llama-3.1-8B-Instruct-GGUF\Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf'
+  draft_gguf: 'C:\models\lmstudio-community\Llama-3.2-1B-Instruct-GGUF\Llama-3.2-1B-Instruct-Q4_K_M.gguf'
+  target_model: Llama-3.1-8B-Instruct-Q4_K_M
+  draft_model: Llama-3.2-1B-Instruct-Q4_K_M
+
+prompts:
+  source: gsm8k
+  split: test
+  n: 8
+  seed: 0
+  # A slice of the frozen exam. Never set this in a real config.
+  allow_partial: true
+
+defaults:
+  max_tokens: 64
+  ignore_eos: true
+  temperature: 0.0
+  seed: 42
+  repeats: 1
+  warmup: 1
+  target_dtype: w4a16
+  batch_size: 1
+  num_threads: 8
+  gguf_quant: Q4_K_M
+
+axes:
+  spec:
+    - {spec_method: none, num_speculative_tokens: null}
+    - {spec_method: draft_model, num_speculative_tokens: 2}
+    - {spec_method: draft_model, num_speculative_tokens: 4}
+
+interleave: true
