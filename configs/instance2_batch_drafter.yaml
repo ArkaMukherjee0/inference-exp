@@ -1,7 +1,20 @@
-# Instance 2 -- E3 (batch-size collapse), E4 (drafter methods), E8 (dense vs MoE).
+# Instance 2 -- E3 (batch-size collapse).
+#
+# E8 (dense vs MoE) moved to instance4_dense_moe.yaml; see the model block below. E4
+# (drafter methods) is NOT covered here despite the original header claiming it -- the
+# spec axis carries one drafter, so there is no method comparison in this config. E4
+# still has no data source anywhere in configs/.
 #
 # Gamma is pinned at the E2 optimum so the batch axis is not confounded with the gamma
-# axis. Write the chosen value here explicitly once E2 has run; do not leave it implicit.
+# axis. That optimum is now measured rather than assumed: on instance-1's completed bf16
+# block (Llama-3.1-8B target, Llama-3.2-1B draft, batch 1, n=80) speedup peaks at
+# gamma=4 (1.922x) and falls away on both sides -- 1.885x at gamma=3, 1.783x at gamma=5,
+# 1.571x at gamma=10. The gamma=4 below is that measurement.
+#
+# Note the reason it peaks there, because it is not the textbook one: per-position
+# acceptance decays with gamma (alpha 0.919 at gamma=1 down to 0.668 at gamma=10), so the
+# constant-alpha Leviathan formula predicts an optimum of 7-10 and is wrong. Do not
+# re-derive this pin from the formula.
 instance: instance-2
 platform: h100
 stack: vllm
@@ -10,8 +23,22 @@ log_path: logs/instance-2.jsonl
 model:
   - target_model: meta-llama/Llama-3.1-8B-Instruct
     draft_model: meta-llama/Llama-3.2-1B-Instruct
-  - target_model: mistralai/Mixtral-8x7B-Instruct-v0.1
-    draft_model: mistralai/Mistral-7B-Instruct-v0.2
+  # The Mixtral arm is disabled, not deleted, for two independent reasons:
+  #
+  # 1. It does not fit. Mixtral-8x7B is 93.4 GB of weights plus Mistral-7B's 14.5 GB for
+  #    the drafter; this box has 27 GB free. Left enabled, the sweep would run the Llama
+  #    conditions for hours and then die part-way through on a full disk, which is the
+  #    worst of both outcomes.
+  # 2. It is redundant. E8 (dense vs MoE) is now measured by instance4_dense_moe.yaml
+  #    with microsoft/Phi-3.5-mini-instruct against microsoft/Phi-mini-MoE-instruct --
+  #    same family, same tokenizer, same precision, so architecture is the only thing
+  #    that varies. That is a better-controlled E8 than Mixtral vs Llama, which would
+  #    have changed family and tokenizer along with architecture.
+  #
+  # This config therefore covers E3 (batch-size collapse) only. Re-enable if a box with
+  # ~110 GB free ever hosts it.
+  # - target_model: mistralai/Mixtral-8x7B-Instruct-v0.1
+  #   draft_model: mistralai/Mistral-7B-Instruct-v0.2
 
 prompts:
   source: gsm8k
