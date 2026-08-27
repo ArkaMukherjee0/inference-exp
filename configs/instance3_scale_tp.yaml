@@ -29,12 +29,18 @@ defaults:
   batch_size: 1
   gpu_memory_utilization: 0.85
 
+# The draft model always runs at the target's tensor_parallel_size. This is not a
+# choice: vLLM's V1 engine rejects a draft narrower than its target outright
+# ("'draft_tensor_parallel_size' and 'tensor_parallel_size' must be the same"), so the
+# draft-TP axis this instance originally carried cannot be expressed on this stack.
+# Verified against vllm==0.28.0 with the 8B/1B pair: tp=2/draft_tp=1 fails at engine
+# init. Restoring that axis means an engine that supports an independently sharded
+# draft, not a config change.
 axes:
   parallelism:
     - {tensor_parallel_size: 1, draft_tensor_parallel_size: 1, nccl_p2p_disabled: false}
-    - {tensor_parallel_size: 2, draft_tensor_parallel_size: 1, nccl_p2p_disabled: false}
     - {tensor_parallel_size: 2, draft_tensor_parallel_size: 2, nccl_p2p_disabled: false}
-    - {tensor_parallel_size: 2, draft_tensor_parallel_size: 1, nccl_p2p_disabled: true}
+    - {tensor_parallel_size: 2, draft_tensor_parallel_size: 2, nccl_p2p_disabled: true}
   spec:
     - {spec_method: none, num_speculative_tokens: null}
     - {spec_method: draft_model, num_speculative_tokens: 4}
