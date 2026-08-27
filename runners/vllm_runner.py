@@ -42,6 +42,71 @@ def _cuda_sync() -> None:
         pass
 
 
+# Field names a vLLM V1 build uses for cumulative speculative-decoding counters. The
+# per-position list is the one that matters: it is what a run-length histogram can be
+# reconstructed from. Totals alone cannot make a distribution.
+_SPEC_PER_POS_FIELDS = ("num_accepted_tokens_per_pos", "accepted_tokens_per_pos",
+                        "num_accepted_tokens_per_position")
+_SPEC_TOTAL_FIELDS = ("num_accepted_tokens", "num_draft_tokens", "num_drafts")
+
+
+def _find_spec_stats(root: Any, depth: int = 0, seen: set[int] | None = None) -> Any:
+    """Locate an object carrying cumulative per-position acceptance counts."""
+    seen = seen if seen is not None else set()
+    if root is None or id(root) in seen or depth > 3:
+        return None
+    seen.add(id(root))
+
+    for name in _SPEC_PER_POS_FIELDS:
+        value = getattr(root, name, None)
+        if isinstance(value, (list, tuple)) and value:
+            return root
+
+    for name in dir(root):
+        if name.startswith("_"):
+            continue
+        try:
+            child = getattr(root, name)
+        except Exception:  # noqa: BLE001 -- probing engine internals
+            continue
+        if callable(child) or isinstance(
+            child, (str, bytes, int, float, bool, list, tuple, dict, set)
+        ):
+            continue
+        found = _find_spec_stats(child, depth + 1, seen)
+        if found is not None:
+            return found
+    return None
+
+
+def _spec_stats_snapshot(llm: Any) -> dict[str, Any] | None:
+    """Cumulative acceptance counters, or None if this build exposes none.
+
+    At batch 1 with one request in flight, the difference between two snapshots is
+    exactly that request's acceptance -- which is why this is usable at all. It would
+    not be under concurrency, and the reconciliation against output_tokens in
+    _hist_from_per_pos is what catches it if that assumption ever breaks.
+    """
+    engine = getattr(llm, "llm_engine", None)
+    if engine is None:
+        return None
+    stats = _find_spec_stats(engine)
+    if stats is None:
+        return None
+
+    snap: dict[str, Any] = {}
+    for name in _SPEC_PER_POS_FIELDS:
+        value = getattr(stats, name, None)
+        if isinstance(value, (list, tuple)) and value:
+            snap["per_pos"] = [int(x) for x in value]
+            break
+    for name in _SPEC_TOTAL_FIELDS:
+        value = getattr(stats, name, None)
+        if isinstance(value, int):
+            snap[name] = value
+    return snap or None
+
+
 # Quantization methods vLLM may report for a 4-bit weight / 16-bit activation checkpoint.
 _W4A16_METHODS = frozenset({"awq", "awq_marlin", "gptq", "gptq_marlin", "compressed-tensors"})
 _FP8_METHODS = frozenset({"fp8", "compressed-tensors", "modelopt"})
@@ -57,6 +122,7 @@ class VLLMRunner:
         self.resolved: dict[str, Any] = {}
         self._llm: Any = None
         self._sampling: Any = None
+        self._spec_before: dict[str, Any] | None = None
         self._log_extra = log_extra or {}
 
     # -- lifecycle ------------------------------------------------------------------
@@ -312,6 +378,10 @@ class VLLMRunner:
         # TTFT first, on a matched single-token request. See _measure_ttft_ms.
         ttft_ms = self._measure_ttft_ms(batch)
 
+        # Snapshot cumulative acceptance AFTER the TTFT probe, so that probe's own
+        # drafting is not attributed to this measurement.
+        self._spec_before = _spec_stats_snapshot(self._llm)
+
         _cuda_sync()
         t0 = time.perf_counter()
         outputs = self._llm.generate(batch, self._sampling, use_tqdm=False)
@@ -449,6 +519,27 @@ class VLLMRunner:
             tried.append(f"RequestOutput.metrics.{attr}")
             if counts:
                 return self._hist_from_per_pos(list(counts), gamma, output_tokens)
+
+        # V1: cumulative counters on the engine's stats objects, differenced across
+        # this one request. Exact at batch 1, and reconciled against output_tokens
+        # below -- if the diff does not describe the tokens actually emitted, that
+        # reconciliation raises rather than recording a plausible wrong histogram.
+        tried.append("engine spec-decode stats snapshot diff")
+        after = _spec_stats_snapshot(self._llm)
+        before = self._spec_before
+        if after and before and "per_pos" in after and "per_pos" in before:
+            width = max(len(after["per_pos"]), len(before["per_pos"]))
+            a = list(after["per_pos"]) + [0] * (width - len(after["per_pos"]))
+            b = list(before["per_pos"]) + [0] * (width - len(before["per_pos"]))
+            delta = [x - y for x, y in zip(a, b)]
+            if any(d < 0 for d in delta):
+                raise RunnerError(
+                    f"cumulative acceptance counters went backwards across one request "
+                    f"({before['per_pos']} -> {after['per_pos']}). The engine reset them "
+                    "mid-measurement, so the difference is not this request's acceptance."
+                )
+            if any(d > 0 for d in delta):
+                return self._hist_from_per_pos(delta, gamma, output_tokens)
 
         # V0: the spec-decode worker aggregated per step on the engine's stat logger.
         engine = getattr(self._llm, "llm_engine", None)

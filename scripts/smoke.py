@@ -114,8 +114,11 @@ def _supported(cfg) -> list[str]:
         required += ["fig02", "fig06"]
     if has_spec and len(batches) > 1:
         required.append("fig03")
-    if has_spec and len(gammas) > 1:
-        required.append("fig04")
+    # Figure 04 is deliberately NOT required. It refuses to render without a measured
+    # draft/target cost ratio, and c comes from isolated batch-1 step timings that this
+    # sweep does not produce -- it is its own measurement step (analysis.model.measure_c),
+    # run once per draft/target pair. Requiring it here would make the smoke test
+    # unpassable by construction, which says nothing about the pipeline.
     if len(dtypes) > 1:
         required.append("fig07")
     if has_spec and len(models) > 1:

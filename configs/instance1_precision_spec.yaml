@@ -21,15 +21,20 @@ model:
 prompts:
   source: gsm8k
   split: test
-  n: 250
+  n: 80
   seed: 0
+  # Sized to a 12-hour budget: 80 of the frozen 250-question exam, taken as a
+  # deterministic prefix so BOTH arms and every condition score the identical 80.
+  # The full exam stays frozen and committed; this narrows what was run, not what
+  # was chosen. Interval width scales ~sqrt(250/80) ~ 1.8x wider than the full set.
+  allow_partial: true
 
 defaults:
   max_tokens: 256
   ignore_eos: true
   temperature: 0.0
   seed: 42
-  repeats: 5
+  repeats: 3
   warmup: 3
   batch_size: 1
   tensor_parallel_size: 1
@@ -50,7 +55,5 @@ axes:
     - {spec_method: draft_model, num_speculative_tokens: 2}
     - {spec_method: draft_model, num_speculative_tokens: 3}
     - {spec_method: draft_model, num_speculative_tokens: 4}
-    - {spec_method: draft_model, num_speculative_tokens: 5}
-    - {spec_method: draft_model, num_speculative_tokens: 7}
 
 interleave: true

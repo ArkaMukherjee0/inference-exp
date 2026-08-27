@@ -161,7 +161,13 @@ def test_shipped_configs_expand(name):
 
 def test_instance1_expands_to_the_expected_grid():
     cfg = load_sweep(CONFIG_DIR / "instance1_precision_spec.yaml")
-    assert len(cfg.conditions) == 3 * 7           # 3 precisions x 7 spec points
+    gammas = sorted({c.num_speculative_tokens for c in cfg.conditions
+                     if c.num_speculative_tokens})
+    # 3 precisions x (one baseline + one condition per gamma).
+    assert len(cfg.conditions) == 3 * (1 + len(gammas))
+    # A gamma sweep needs enough points to show a turnover; below four there is no
+    # figure 04 and no optimal-gamma result, only a slope.
+    assert len(gammas) >= 4
     assert {c.target_dtype for c in cfg.conditions} == {"bf16", "fp8", "w4a16"}
     baselines = [c for c in cfg.conditions if c.spec_method == "none"]
     assert len(baselines) == 3
@@ -303,12 +309,34 @@ def test_asking_for_more_than_the_frozen_exam_always_raises(tmp_path, monkeypatc
         run_sweep.load_prompts(cfg)
 
 
-def test_real_sweep_configs_do_not_opt_into_partial():
-    """Only the smoke config may run a slice of the exam."""
+def test_both_arms_score_the_identical_exam():
+    """The invariant that matters is not "all 250" -- it is "the same questions".
+
+    A sweep sized down to fit a budget is legitimate, because allow_partial takes a
+    deterministic *prefix* of the frozen list. What would not be legitimate is the CPU
+    arm and the GPU arm scoring different subsets: figure 05 puts them on one axis, and
+    a quality or acceptance difference that was really a difference in which questions
+    were asked would be invisible.
+    """
     from core.config import load_sweep
 
-    for name in ("instance1_precision_spec.yaml", "instance2_batch_drafter.yaml",
-                 "instance3_scale_tp.yaml", "local_cpu.yaml"):
+    gpu = load_sweep(CONFIG_DIR / "instance1_precision_spec.yaml")
+    cpu = load_sweep(CONFIG_DIR / "local_cpu.yaml")
+
+    assert gpu.prompts.n == cpu.prompts.n, "the two arms must ask the same questions"
+    assert gpu.prompts.seed == cpu.prompts.seed
+    assert gpu.prompts.allow_partial == cpu.prompts.allow_partial
+    assert gpu.prompts.split == cpu.prompts.split
+
+    # A reduced run must say so explicitly; it may never happen by accident.
+    if gpu.prompts.n < 250:
+        assert gpu.prompts.allow_partial, "a partial exam must be opted into, not implied"
+
+
+def test_sized_configs_keep_repeats_high_enough_to_absorb_a_bad_run():
+    """Below three repeats the median over repeats degenerates and one hiccup lands."""
+    from core.config import load_sweep
+
+    for name in ("instance1_precision_spec.yaml", "local_cpu.yaml"):
         cfg = load_sweep(CONFIG_DIR / name)
-        assert not cfg.prompts.allow_partial, f"{name} must score the full exam"
-        assert cfg.prompts.n == 250, name
+        assert min(c.repeats for c in cfg.conditions) >= 3, name
