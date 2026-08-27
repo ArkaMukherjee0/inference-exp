@@ -62,9 +62,25 @@ def load_prompts(cfg: SweepConfig) -> PromptSet:
 
     examples = load_subset()
     if len(examples) != cfg.prompts.n:
-        raise ValueError(
-            f"frozen subset has {len(examples)} examples but config asks for "
-            f"{cfg.prompts.n}. The exam and the config disagree."
+        if cfg.prompts.n > len(examples):
+            raise ValueError(
+                f"config asks for {cfg.prompts.n} prompts but the frozen subset holds "
+                f"only {len(examples)}. Re-freeze the subset deliberately, or lower n."
+            )
+        if not cfg.prompts.allow_partial:
+            raise ValueError(
+                f"frozen subset has {len(examples)} examples but config asks for "
+                f"{cfg.prompts.n}. The exam and the config disagree.\n"
+                "If that is deliberate (a smoke or debug run), set "
+                "prompts.allow_partial: true in the config. Do not do this for a real "
+                "sweep -- every instance must score the same exam."
+            )
+        # First n in committed order: deterministic, identical on every machine, and
+        # identical across every condition in this sweep.
+        examples = examples[: cfg.prompts.n]
+        print(
+            f"NOTE: partial prompt set -- {cfg.prompts.n} of the frozen exam "
+            f"(allow_partial). Not comparable with a full-exam sweep."
         )
     return PromptSet(
         ids=[e.prompt_id for e in examples],
@@ -97,7 +113,22 @@ def remaining(queue: list[WorkUnit], done: set) -> list[WorkUnit]:
 # --------------------------------------------------------------------------------------
 
 
+def _tolerant_stdout() -> None:
+    """Never let a console encoding kill a run.
+
+    Windows consoles default to cp1252 and raise UnicodeEncodeError on characters the
+    figures use freely. A benchmark sweep must not die four hours in because a status
+    line contained a Greek letter.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerant_stdout()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
     ap.add_argument("--dry-run", action="store_true", help="print the plan and exit")
@@ -262,9 +293,11 @@ def _llamacpp_binary(cfg: SweepConfig) -> str | None:
 
 
 def _describe(condition: RunConfig) -> str:
+    # ASCII only: this goes to a terminal, and a Windows console in cp1252 raises
+    # UnicodeEncodeError on a gamma. Figures and written files keep the real symbol.
     bits = [condition.target_dtype, condition.spec_method]
     if condition.num_speculative_tokens:
-        bits.append(f"γ={condition.num_speculative_tokens}")
+        bits.append(f"gamma={condition.num_speculative_tokens}")
     if condition.batch_size != 1:
         bits.append(f"batch={condition.batch_size}")
     if condition.tensor_parallel_size != 1:

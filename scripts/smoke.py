@@ -26,7 +26,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_FIGURES = ["fig01", "fig02", "fig03", "fig04", "fig05", "fig06", "fig07", "fig08"]
 
 
+def _tolerant_stdout() -> None:
+    """Never let a console encoding kill a run.
+
+    Windows consoles default to cp1252 and raise UnicodeEncodeError on characters the
+    figures use freely. A benchmark sweep must not die four hours in because a status
+    line contained a Greek letter.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerant_stdout()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="configs/smoke.yaml")
     ap.add_argument("--outdir", default="report/smoke")

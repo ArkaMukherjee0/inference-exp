@@ -13,8 +13,8 @@ log_path: logs/local-cpu.jsonl
 
 model:
   binary: llama-speculative
-  target_gguf: models/Llama-3.1-8B-Instruct-Q4_K_M.gguf
-  draft_gguf: models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+  target_gguf: 'C:\models\lmstudio-community\Meta-Llama-3.1-8B-Instruct-GGUF\Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf'
+  draft_gguf: 'C:\models\lmstudio-community\Llama-3.2-1B-Instruct-GGUF\Llama-3.2-1B-Instruct-Q4_K_M.gguf'
   target_model: Llama-3.1-8B-Instruct-Q4_K_M
   draft_model: Llama-3.2-1B-Instruct-Q4_K_M
 

@@ -16,6 +16,9 @@ prompts:
   split: test
   n: 20
   seed: 0
+  # Deliberately a slice of the frozen 250-question exam: this is a pipeline test, not a
+  # quality measurement. Real sweep configs must never set this.
+  allow_partial: true
 
 defaults:
   max_tokens: 32

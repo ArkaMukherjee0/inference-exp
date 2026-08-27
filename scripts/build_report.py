@@ -12,6 +12,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 from pathlib import Path
 from typing import Any
@@ -245,7 +246,22 @@ def _verify_traceability(table: pd.DataFrame, df: pd.DataFrame) -> None:
         )
 
 
+def _tolerant_stdout() -> None:
+    """Never let a console encoding kill a run.
+
+    Windows consoles default to cp1252 and raise UnicodeEncodeError on characters the
+    figures use freely. A benchmark sweep must not die four hours in because a status
+    line contained a Greek letter.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerant_stdout()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--logs", nargs="+", required=True)
     ap.add_argument("--outdir", default="report")

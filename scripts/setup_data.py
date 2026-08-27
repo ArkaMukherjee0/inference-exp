@@ -213,7 +213,22 @@ def setup_wikitext(*, split: str) -> None:
     print("(cache warming only -- window and stride are set per-run in the eval config)")
 
 
+def _tolerant_stdout() -> None:
+    """Never let a console encoding kill a run.
+
+    Windows consoles default to cp1252 and raise UnicodeEncodeError on characters the
+    figures use freely. A benchmark sweep must not die four hours in because a status
+    line contained a Greek letter.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerant_stdout()
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

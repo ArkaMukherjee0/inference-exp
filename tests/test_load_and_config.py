@@ -239,3 +239,76 @@ def _write(tmp_path: Path, records: list[dict]) -> Path:
         for rec in records:
             fh.write(json.dumps(rec) + "\n")
     return path
+
+
+# -- partial prompt sets ---------------------------------------------------------------
+#
+# The smoke test genuinely wants 20 prompts out of the frozen 250-question exam. A real
+# sweep whose n disagrees with the exam is almost always a typo, and one that would score
+# a different exam than every other instance. So it is allowed, but only on explicit
+# opt-in.
+
+
+def _fake_subset(n: int):
+    from evals.gsm8k import Example
+
+    return [Example(prompt_id=f"gsm8k-test-{i}", question=f"q{i}", answer=str(i))
+            for i in range(n)]
+
+
+def _sweep_with(tmp_path, **prompt_overrides):
+    import yaml
+
+    from core.config import load_sweep
+
+    raw = yaml.safe_load((CONFIG_DIR / "smoke.yaml").read_text(encoding="utf-8"))
+    raw["prompts"].update(prompt_overrides)
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return load_sweep(path)
+
+
+def test_allow_partial_takes_a_deterministic_prefix(tmp_path, monkeypatch):
+    import evals.gsm8k as gsm8k
+    from scripts import run_sweep
+
+    monkeypatch.setattr(gsm8k, "load_subset", lambda: _fake_subset(250))
+    cfg = _sweep_with(tmp_path, n=20, allow_partial=True)
+    prompts = run_sweep.load_prompts(cfg)
+
+    assert len(prompts.ids) == 20
+    # First n in committed order: identical on every machine and across every condition.
+    assert prompts.ids == [f"gsm8k-test-{i}" for i in range(20)]
+
+
+def test_partial_prompt_set_requires_the_opt_in(tmp_path, monkeypatch):
+    """A typo'd n in a real config must not silently score a different exam."""
+    import evals.gsm8k as gsm8k
+    from scripts import run_sweep
+
+    monkeypatch.setattr(gsm8k, "load_subset", lambda: _fake_subset(250))
+    cfg = _sweep_with(tmp_path, n=20, allow_partial=False)
+    with pytest.raises(ValueError, match="allow_partial"):
+        run_sweep.load_prompts(cfg)
+
+
+def test_asking_for_more_than_the_frozen_exam_always_raises(tmp_path, monkeypatch):
+    """allow_partial cannot conjure questions that were never frozen."""
+    import evals.gsm8k as gsm8k
+    from scripts import run_sweep
+
+    monkeypatch.setattr(gsm8k, "load_subset", lambda: _fake_subset(250))
+    cfg = _sweep_with(tmp_path, n=500, allow_partial=True)
+    with pytest.raises(ValueError, match="frozen subset holds"):
+        run_sweep.load_prompts(cfg)
+
+
+def test_real_sweep_configs_do_not_opt_into_partial():
+    """Only the smoke config may run a slice of the exam."""
+    from core.config import load_sweep
+
+    for name in ("instance1_precision_spec.yaml", "instance2_batch_drafter.yaml",
+                 "instance3_scale_tp.yaml", "local_cpu.yaml"):
+        cfg = load_sweep(CONFIG_DIR / name)
+        assert not cfg.prompts.allow_partial, f"{name} must score the full exam"
+        assert cfg.prompts.n == 250, name

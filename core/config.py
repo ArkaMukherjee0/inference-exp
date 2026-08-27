@@ -45,7 +45,8 @@ _DEFAULTS_KEYS = frozenset({
     "gguf_quant", "target_dtype", "draft_model", "spec_method",
     "num_speculative_tokens",
 })
-_PROMPTS_KEYS = frozenset({"source", "split", "n", "seed", "stride", "path"})
+_PROMPTS_KEYS = frozenset({"source", "split", "n", "seed", "stride", "path",
+                           "allow_partial"})
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,15 @@ class PromptSpec:
     seed: int
     stride: int | None = None
     path: str | None = None
+    # Opt-in to running fewer prompts than the frozen exam holds.
+    #
+    # Off by default, because a real sweep whose n disagrees with the frozen subset is
+    # almost always a typo -- and one that would quietly score a different exam than
+    # every other instance. The smoke test genuinely wants twenty prompts, so it says so.
+    # Conditions within a partial run still all see the identical prompt set, and
+    # analysis.stats.align_pair refuses to compare a 20-prompt condition against a
+    # 250-prompt one, so a partial run cannot leak into the real results.
+    allow_partial: bool = False
 
 
 @dataclass(frozen=True)
@@ -176,6 +186,7 @@ def load_sweep(path: str | Path) -> SweepConfig:
         seed=int(raw["prompts"].get("seed", 0)),
         stride=raw["prompts"].get("stride"),
         path=raw["prompts"].get("path"),
+        allow_partial=bool(raw["prompts"].get("allow_partial", False)),
     )
 
     defaults = dict(raw.get("defaults") or {})
