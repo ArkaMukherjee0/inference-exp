@@ -27,6 +27,16 @@ import pandas as pd
 
 SUBSET_PATH = Path(__file__).with_name("gsm8k_subset_ids.json")
 
+# Fully-qualified ``namespace/name``, never the bare legacy alias.
+#
+# The old "canonical" datasets (``gsm8k``, ``wikitext``, ...) were moved under real
+# namespaces, and current huggingface_hub rejects an unqualified id outright: it builds
+# ``hf://datasets/gsm8k@.../...`` and raises HfUriError because the repo id is not
+# ``namespace/name``. Pinning the qualified id resolves on both old and new clients, so
+# there is no version sniffing here.
+GSM8K_DATASET = "openai/gsm8k"
+GSM8K_CONFIG = "main"
+
 # The gold answer sits after '####' in GSM8K's reference solutions.
 _GOLD_RE = re.compile(r"####\s*(-?[\d,]*\.?\d+)")
 # Standard final-number extraction: the last number appearing in the completion.
@@ -116,7 +126,17 @@ def build_subset(*, n: int, seed: int, split: str = "test", force: bool = False)
     idx = sorted(rng.choice(len(rows), size=n, replace=False).tolist())
     ids = [f"gsm8k-{split}-{i}" for i in idx]
     SUBSET_PATH.write_text(
-        json.dumps({"split": split, "seed": seed, "n": n, "ids": ids}, indent=2),
+        json.dumps(
+            {
+                "dataset": GSM8K_DATASET,
+                "config": GSM8K_CONFIG,
+                "split": split,
+                "seed": seed,
+                "n": n,
+                "ids": ids,
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     return ids
@@ -130,6 +150,16 @@ def load_subset() -> list[Example]:
             "it must then be committed so every instance scores the same exam."
         )
     meta = json.loads(SUBSET_PATH.read_text(encoding="utf-8"))
+    # The ids are positional indices into a split, so they are only meaningful against
+    # the dataset they were drawn from. Files written before this field existed are
+    # assumed to be the current source, which they were.
+    recorded = meta.get("dataset", GSM8K_DATASET)
+    if recorded != GSM8K_DATASET:
+        raise ValueError(
+            f"{SUBSET_PATH} was frozen against {recorded!r} but this code loads "
+            f"{GSM8K_DATASET!r}. The ids are positional, so they would select different "
+            "questions. Re-freeze the subset deliberately rather than silently rescoring."
+        )
     rows = _load_hf_split(meta["split"])
     examples: list[Example] = []
     for pid in meta["ids"]:
@@ -156,7 +186,7 @@ def _load_hf_split(split: str) -> list[dict]:
             "the 'datasets' package is required to load GSM8K. Install it; do not "
             "substitute a local copy of unknown provenance."
         ) from exc
-    ds = load_dataset("gsm8k", "main", split=split)
+    ds = load_dataset(GSM8K_DATASET, GSM8K_CONFIG, split=split)
     return [{"question": r["question"], "answer": r["answer"]} for r in ds]
 
 

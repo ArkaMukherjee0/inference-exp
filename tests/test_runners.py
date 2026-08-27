@@ -250,3 +250,102 @@ def test_vllm_speculative_config_uses_the_structured_form():
     spec = VLLMRunner(cfg)._speculative_config()
     assert spec["method"] == "eagle3"
     assert spec["num_speculative_tokens"] == 3
+
+
+# -- precision resolution guards -------------------------------------------------------
+#
+# The guard that stops a BF16 run being recorded as FP8. Quantization is an experimental
+# axis in this study (E1, E7), so a condition mislabelled by precision does not produce a
+# slightly-off number -- it produces a headline finding about composition that is simply
+# false. These exercise _verify_resolution against stub engine configs, since a real vLLM
+# is not available here.
+
+
+class _StubModelConfig:
+    def __init__(self, model: str, quantization: str | None, dtype: str) -> None:
+        self.model = model
+        self.quantization = quantization
+        self.dtype = dtype
+
+
+class _StubVllmConfig:
+    def __init__(self, model_config, speculative_config=None) -> None:
+        self.model_config = model_config
+        self.speculative_config = speculative_config
+
+
+def _runner_with(model_cfg, spec_cfg=None, **config_overrides):
+    """A VLLMRunner whose engine-config read is stubbed out."""
+    cfg = _gpu_config(**config_overrides)
+    runner = VLLMRunner(cfg)
+    runner._engine_config = lambda: _StubVllmConfig(model_cfg, spec_cfg)  # noqa: SLF001
+    return runner
+
+
+def test_bf16_claim_against_a_quantized_checkpoint_raises():
+    runner = _runner_with(
+        _StubModelConfig("org/m", "awq_marlin", "torch.bfloat16"), target_dtype="bf16"
+    )
+    with pytest.raises(RunnerError, match="bf16 but the checkpoint resolved"):
+        runner._verify_resolution(requested_spec=None)
+
+
+def test_bf16_claim_against_a_non_bf16_dtype_raises():
+    runner = _runner_with(_StubModelConfig("org/m", None, "torch.float16"), target_dtype="bf16")
+    with pytest.raises(RunnerError, match="engine dtype resolved"):
+        runner._verify_resolution(requested_spec=None)
+
+
+def test_fp8_claim_against_an_unquantized_checkpoint_raises():
+    """The costliest possible mislabel: a BF16 run entering the table as FP8."""
+    runner = _runner_with(_StubModelConfig("org/m", None, "torch.bfloat16"), target_dtype="fp8")
+    with pytest.raises(RunnerError, match="fp8 but resolved quantization is None"):
+        runner._verify_resolution(requested_spec=None)
+
+
+def test_w4a16_claim_against_a_gguf_checkpoint_raises():
+    """GGUF k-quants are not W4A16.
+
+    Q4_K_M is a llama.cpp mixed-precision block format built for CPU; W4A16 here means
+    4-bit weights with 16-bit activations through Marlin/AWQ/GPTQ kernels. They differ in
+    both quality and speed characteristics, so recording one as the other would put two
+    different quantization schemes in the same column of the results table.
+    """
+    runner = _runner_with(_StubModelConfig("org/m", "gguf", "torch.bfloat16"),
+                          target_dtype="w4a16")
+    with pytest.raises(RunnerError, match="w4a16 but resolved quantization is 'gguf'"):
+        runner._verify_resolution(requested_spec=None)
+
+
+@pytest.mark.parametrize("method", ["awq", "awq_marlin", "gptq", "gptq_marlin",
+                                    "compressed-tensors"])
+def test_recognized_w4a16_methods_pass(method):
+    runner = _runner_with(_StubModelConfig("org/m", method, "torch.bfloat16"),
+                          target_dtype="w4a16")
+    runner._verify_resolution(requested_spec=None)
+    assert runner.resolved["quantization"] == method
+
+
+@pytest.mark.parametrize("method", ["fp8", "compressed-tensors", "modelopt"])
+def test_recognized_fp8_methods_pass(method):
+    runner = _runner_with(_StubModelConfig("org/m", method, "torch.bfloat16"),
+                          target_dtype="fp8")
+    runner._verify_resolution(requested_spec=None)
+
+
+def test_silent_model_substitution_raises():
+    """A 7B config that quietly loaded something else after an OOM."""
+    runner = _runner_with(_StubModelConfig("org/other-1b", None, "torch.bfloat16"),
+                          target_dtype="bf16")
+    with pytest.raises(RunnerError, match="does not match requested"):
+        runner._verify_resolution(requested_spec=None)
+
+
+def test_speculation_silently_disabled_raises():
+    runner = _runner_with(
+        _StubModelConfig("org/m", None, "torch.bfloat16"), spec_cfg=None,
+        target_dtype="bf16", spec_method="draft_model", num_speculative_tokens=4,
+        draft_model="org/d",
+    )
+    with pytest.raises(RunnerError, match="resolved none"):
+        runner._verify_resolution(requested_spec={"num_speculative_tokens": 4})

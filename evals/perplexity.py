@@ -25,7 +25,9 @@ class PPLConfig:
     max_length: int
     stride: int
     split: str = "test"
-    dataset: str = "wikitext"
+    # Fully-qualified ``namespace/name``: the bare alias "wikitext" is a legacy
+    # canonical id that current huggingface_hub rejects. See evals/gsm8k.py.
+    dataset: str = "Salesforce/wikitext"
     subset: str = "wikitext-2-raw-v1"
 
     def __post_init__(self) -> None:

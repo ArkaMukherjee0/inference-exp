@@ -204,3 +204,42 @@ def test_paired_window_nll_aligns_equal_configs():
     av, bv = paired_window_nll(a, b)
     assert av.shape == bv.shape == (3,)
     assert np.all(bv > av)
+
+
+# -- dataset identifiers ---------------------------------------------------------------
+
+
+def test_dataset_ids_are_namespace_qualified():
+    """Bare 'canonical' dataset aliases no longer resolve.
+
+    The legacy ids (``gsm8k``, ``wikitext``) were moved under real namespaces, and
+    current huggingface_hub rejects an unqualified id: it builds
+    ``hf://datasets/gsm8k@.../...`` and raises HfUriError because the repo id is not
+    ``namespace/name``. This failed at the first line of a sweep, after the model had
+    already loaded.
+    """
+    import inspect
+
+    from evals import gsm8k, perplexity
+
+    assert "/" in gsm8k.GSM8K_DATASET, gsm8k.GSM8K_DATASET
+    assert "/" in perplexity.PPLConfig(max_length=512, stride=256).dataset
+
+    # And no bare literal survives at a call site.
+    for module in (gsm8k, perplexity):
+        source = inspect.getsource(module)
+        assert 'load_dataset("gsm8k"' not in source
+        assert 'load_dataset("wikitext"' not in source
+
+
+def test_frozen_subset_records_the_dataset_it_indexes():
+    """The ids are positional, so they only mean anything against one source repo."""
+    import json
+
+    from evals.gsm8k import SUBSET_PATH
+
+    if not SUBSET_PATH.exists():
+        pytest.skip("frozen subset not built on this machine")
+    meta = json.loads(SUBSET_PATH.read_text(encoding="utf-8"))
+    assert "/" in meta["dataset"]
+    assert meta["n"] == len(meta["ids"])

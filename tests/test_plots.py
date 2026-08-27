@@ -82,7 +82,8 @@ def test_fig04_renders(measured_df, tmp_outdir):
 
 
 def test_fig05_renders(measured_df, tmp_outdir):
-    out = fig05.render(measured_df, tmp_outdir, ridge_points={"h100_tp1": 295.0})
+    out = fig05.render(measured_df, tmp_outdir, ridge_points={"h100_tp1": 295.0},
+                       target_dtype="bf16")
     assert out.exists()
 
 
@@ -107,7 +108,7 @@ def test_fig04_refuses_to_predict_without_a_measured_c(measured_df, tmp_outdir):
 
 def test_fig05_refuses_a_platform_with_no_measured_ridge_point(measured_df, tmp_outdir):
     with pytest.raises(ValueError, match="no measured ridge point"):
-        fig05.render(measured_df, tmp_outdir, ridge_points={})
+        fig05.render(measured_df, tmp_outdir, ridge_points={}, target_dtype="bf16")
 
 
 def test_fig05_reads_ridge_points_only_from_micro_json(tmp_path):
@@ -224,3 +225,29 @@ def test_precision_axis_figures_refuse_an_ambiguous_model_set(measured_df, tmp_o
     for module, kwargs in ((fig02, {}), (fig03, {}), (fig04, {"c": 0.05})):
         with pytest.raises(ValueError, match="one target model"):
             module.render(measured_df, tmp_outdir, **kwargs)
+
+
+def test_fig05_refuses_to_mix_precisions_across_platforms(measured_df, tmp_outdir):
+    """The platform axis must not be confounded with the precision axis.
+
+    E1 establishes that speculative speedup depends on precision, so a CPU point at 4-bit
+    beside an H100 point at BF16 would attribute a precision effect to the hardware.
+    """
+    with pytest.raises(ValueError, match="spans precisions"):
+        fig05.render(measured_df, tmp_outdir, ridge_points={"h100_tp1": 295.0})
+
+
+def test_fig05_renders_with_a_pinned_precision(measured_df, tmp_outdir):
+    out = fig05.render(measured_df, tmp_outdir, ridge_points={"h100_tp1": 295.0},
+                       target_dtype="bf16")
+    assert out.exists()
+
+
+def test_fig05_labels_carry_the_held_constant_precision(measured_df):
+    from analysis.derive import speedup_table
+    from plots.fig05 import _platform_points
+
+    table = speedup_table(measured_df)
+    table = table[table["batch_size"] == table["batch_size"].min()]
+    points = _platform_points(table, {"h100_tp1": 295.0}, "w4a16")
+    assert all("W4A16" in label for label in points["label"])

@@ -1,4 +1,6 @@
 {
+  "dataset": "openai/gsm8k",
+  "config": "main",
   "split": "test",
   "seed": 0,
   "n": 250,

@@ -33,14 +33,20 @@ def render(
     *,
     ridge_points: dict[str, float],
     extrapolated: set[str] | None = None,
+    target_dtype: str | None = None,
 ) -> Path:
-    """``ridge_points`` maps a platform key to its measured FLOP/byte, from bench/micro.py."""
+    """``ridge_points`` maps a platform key to its measured FLOP/byte, from bench/micro.py.
+
+    ``target_dtype`` pins the precision every point is measured at. Required whenever the
+    frame spans more than one, because otherwise the platform axis and the precision axis
+    are confounded -- see ``_platform_points``.
+    """
     require_measured(df)
     extrapolated = extrapolated or set()
 
     table = speedup_table(df)
     table = table[table["batch_size"] == table["batch_size"].min()]
-    points = _platform_points(table, ridge_points)
+    points = _platform_points(table, ridge_points, target_dtype)
     if points.empty:
         raise ValueError("fig05: no platform points could be assembled")
 
@@ -87,13 +93,36 @@ def render(
     return style.save(fig, outdir, "fig05_platform_curve")
 
 
-def _platform_points(table: pd.DataFrame, ridge_points: dict[str, float]) -> pd.DataFrame:
+def _platform_points(
+    table: pd.DataFrame,
+    ridge_points: dict[str, float],
+    target_dtype: str | None = None,
+) -> pd.DataFrame:
     """Collapse the sweep to one speedup per platform key.
 
     The key is ``platform`` plus tensor-parallel size, because TP changes the effective
     bandwidth per parameter and is therefore a different point on this axis, not a
     variation of the same one.
+
+    **Precision must be held constant across the points.** Figure 05 attributes the
+    difference between platforms to their ridge points, and E1 establishes that precision
+    changes speculative speedup on its own -- so a CPU point measured at 4-bit against an
+    H100 point measured at BF16 confounds the two effects completely, and the figure would
+    be attributing a precision effect to the hardware. Mixing them raises.
     """
+    dtypes = sorted(table["target_dtype"].dropna().unique())
+    if target_dtype is not None:
+        if target_dtype not in dtypes:
+            raise ValueError(f"target_dtype {target_dtype!r} not present; have {dtypes}")
+        table = table[table["target_dtype"] == target_dtype]
+    elif len(dtypes) > 1:
+        raise ValueError(
+            f"figure 05 spans precisions {dtypes}. Speculative speedup depends on "
+            "precision (that is experiment E1), so points at different precisions are "
+            "not comparable across platforms -- the hardware effect and the precision "
+            "effect would be indistinguishable. Pass target_dtype=... to pin one."
+        )
+
     rows = []
     for (plat, tp), group in table.groupby(["platform", "tensor_parallel_size"]):
         key = f"{plat}_tp{int(tp)}" if plat != "cpu" else "cpu"
@@ -109,7 +138,8 @@ def _platform_points(table: pd.DataFrame, ridge_points: dict[str, float]) -> pd.
         idx = len(rows) % len(style.SERIES)
         rows.append({
             "key": key,
-            "label": _label(plat, int(tp), int(best["num_speculative_tokens"])),
+            "label": _label(plat, int(tp), int(best["num_speculative_tokens"]),
+                            str(best["target_dtype"])),
             "ridge_point": float(ridge_points[key]),
             "speedup": float(best["speedup"]),
             "speedup_lo95": float(best["speedup_lo95"]),
@@ -121,9 +151,11 @@ def _platform_points(table: pd.DataFrame, ridge_points: dict[str, float]) -> pd.
     return pd.DataFrame(rows)
 
 
-def _label(platform: str, tp: int, gamma: int) -> str:
+def _label(platform: str, tp: int, gamma: int, dtype: str) -> str:
+    """Point label. The precision is shown because it is the held-constant variable --
+    a reader has to be able to see what was held fixed to believe the axis."""
     base = "CPU" if platform == "cpu" else f"{platform.upper()} TP{tp}"
-    return f"{base}\nγ={gamma}"
+    return f"{base}\n{style.DTYPE_LABEL.get(dtype, dtype)}, γ={gamma}"
 
 
 def ridge_points_from_micro(paths: dict[str, str | Path]) -> dict[str, float]:
