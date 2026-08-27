@@ -174,6 +174,7 @@ REQUIRED_FIELDS: Final[list[str]] = [
 OPTIONAL_FIELDS: Final[frozenset[str]] = frozenset({
     "latency_valid",          # WP4: False on every HF record; gates all speed figures
     "timing_method",          # how ttft/total were obtained; see runners/vllm_runner.py
+    "acceptance_unavailable", # explicit exemption: engine exposes no acceptance counts
     "resolved_spec_config",   # WP2: what the engine actually resolved our request to
     "resolved_model_path",    # guard against silent model substitution
     "gpu_memory_utilization",
@@ -278,6 +279,8 @@ def validate_record(rec: dict) -> None:
         _require_type(rec, "latency_valid", (bool,))
     if "timing_method" in rec:
         _require_type(rec, "timing_method", (str,))
+    if "acceptance_unavailable" in rec:
+        _require_type(rec, "acceptance_unavailable", (bool,))
 
     # -- integers --------------------------------------------------------------------
     for key in ("tensor_parallel_size", "draft_tensor_parallel_size", "batch_size",
@@ -334,7 +337,29 @@ def validate_record(rec: dict) -> None:
     if any(not isinstance(x, int) or isinstance(x, bool) or x < 0 for x in hist):
         raise ValueError("accept_length_histogram: every entry must be a non-negative int")
 
-    if rec["spec_method"] == "none":
+    if rec["spec_method"] != "none" and rec.get("acceptance_unavailable"):
+        # A speculative run on an engine that reports no per-request acceptance.
+        #
+        # The default rule -- speculation implies a non-empty histogram -- exists to catch
+        # extraction silently failing, and it stays in force everywhere else. This is the
+        # one way past it, and it is deliberately loud: the flag is stamped on the record,
+        # so a missing distribution can never be mistaken for a measured one, and the
+        # analysis layer refuses these rows for any acceptance-derived figure.
+        #
+        # Speed measurements on such a record remain fully valid. Acceptance ones do not
+        # exist, which is different from being zero.
+        for key in ("accepted_tokens", "draft_tokens_proposed", "acceptance_rate",
+                    "mean_accept_length"):
+            if rec[key] is not None:
+                raise ValueError(
+                    f"{key}: must be null when acceptance_unavailable is true (got "
+                    f"{rec[key]!r}). Partial acceptance data is not an exemption."
+                )
+        if rec["accept_length_histogram"]:
+            raise ValueError(
+                "accept_length_histogram: must be [] when acceptance_unavailable is true"
+            )
+    elif rec["spec_method"] == "none":
         for key in _SPEC_ONLY_FIELDS:
             if rec[key] is not None:
                 raise ValueError(

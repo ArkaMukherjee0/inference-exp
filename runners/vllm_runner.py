@@ -46,7 +46,10 @@ def _cuda_sync() -> None:
 # per-position list is the one that matters: it is what a run-length histogram can be
 # reconstructed from. Totals alone cannot make a distribution.
 _SPEC_PER_POS_FIELDS = ("num_accepted_tokens_per_pos", "accepted_tokens_per_pos",
-                        "num_accepted_tokens_per_position")
+                        "num_accepted_tokens_per_position",
+                        # vLLM V1's SpecDecodingLogging keeps a list *of lists*, one per
+                        # logged interval, under this name.
+                        "accepted_tokens_per_pos_lists")
 _SPEC_TOTAL_FIELDS = ("num_accepted_tokens", "num_draft_tokens", "num_drafts")
 
 
@@ -69,13 +72,24 @@ def _find_spec_stats(root: Any, depth: int = 0, seen: set[int] | None = None) ->
             child = getattr(root, name)
         except Exception:  # noqa: BLE001 -- probing engine internals
             continue
-        if callable(child) or isinstance(
-            child, (str, bytes, int, float, bool, list, tuple, dict, set)
-        ):
+        if callable(child) or isinstance(child, (str, bytes, int, float, bool)):
             continue
-        found = _find_spec_stats(child, depth + 1, seen)
-        if found is not None:
-            return found
+        # Descend into containers as well as objects. vLLM V1 keeps its stat loggers in
+        # a dict on the manager, so refusing to look inside dicts and lists means never
+        # reaching the only object in the parent process that has the counts at all.
+        children = []
+        if isinstance(child, dict):
+            children = list(child.values())
+        elif isinstance(child, (list, tuple, set)):
+            children = list(child)
+        else:
+            children = [child]
+        for item in children:
+            if isinstance(item, (str, bytes, int, float, bool)):
+                continue
+            found = _find_spec_stats(item, depth + 1, seen)
+            if found is not None:
+                return found
     return None
 
 
@@ -97,9 +111,20 @@ def _spec_stats_snapshot(llm: Any) -> dict[str, Any] | None:
     snap: dict[str, Any] = {}
     for name in _SPEC_PER_POS_FIELDS:
         value = getattr(stats, name, None)
-        if isinstance(value, (list, tuple)) and value:
+        if not isinstance(value, (list, tuple)) or not value:
+            continue
+        if isinstance(value[0], (list, tuple)):
+            # A list of per-interval lists: sum them column-wise into one cumulative
+            # per-position vector.
+            width = max(len(row) for row in value)
+            totals = [0] * width
+            for row in value:
+                for i, count in enumerate(row):
+                    totals[i] += int(count)
+            snap["per_pos"] = totals
+        else:
             snap["per_pos"] = [int(x) for x in value]
-            break
+        break
     for name in _SPEC_TOTAL_FIELDS:
         value = getattr(stats, name, None)
         if isinstance(value, int):
@@ -115,10 +140,16 @@ _FP8_METHODS = frozenset({"fp8", "compressed-tensors", "modelopt"})
 class VLLMRunner:
     """One vLLM engine for exactly one condition. Never reused across conditions."""
 
-    def __init__(self, config: RunConfig, *, log_extra: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: RunConfig, *, log_extra: dict[str, Any] | None = None,
+                 allow_missing_acceptance: bool = False) -> None:
         if config.stack != "vllm":
             raise RunnerError(f"VLLMRunner got stack={config.stack!r}")
         self.config = config
+        # Off by default. When on, an engine that exposes no per-request acceptance
+        # yields records that are speed-valid and acceptance-null, stamped so that the
+        # gap is visible in every downstream table. It never fabricates a distribution.
+        self.allow_missing_acceptance = allow_missing_acceptance
+        self.acceptance_unavailable = False
         self.resolved: dict[str, Any] = {}
         self._llm: Any = None
         self._sampling: Any = None
@@ -476,7 +507,15 @@ class VLLMRunner:
         if token_ids is None:
             raise RunnerError("completion carries no token_ids; cannot count output tokens.")
 
-        hist, proposed = self._acceptance(out, output_tokens=len(token_ids))
+        try:
+            hist, proposed = self._acceptance(out, output_tokens=len(token_ids))
+        except RunnerError:
+            if not self.allow_missing_acceptance or self.config.spec_method == "none":
+                raise
+            # Recorded as absent, not as zero. Speed figures still use this row; every
+            # acceptance-derived figure refuses it.
+            self.acceptance_unavailable = True
+            hist, proposed = [], None
         return GenResult(
             ttft_ms=ttft_ms,
             total_ms=total_ms,

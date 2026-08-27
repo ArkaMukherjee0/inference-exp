@@ -248,6 +248,7 @@ def _worker_main(cfg: SweepConfig, prompts: PromptSet, queue: list[WorkUnit],
                 is_warmup=unit.is_warmup,
                 result=result,
                 latency_valid=(condition.stack != "hf"),
+                acceptance_unavailable=bool(getattr(runner, "acceptance_unavailable", False)),
                 resolved=runner.resolved,
             )
             append_record(log_path, record)
@@ -264,7 +265,10 @@ def build_runner(condition: RunConfig, cfg: SweepConfig):
     if condition.stack == "vllm":
         from runners.vllm_runner import VLLMRunner
 
-        return VLLMRunner(condition)
+        return VLLMRunner(
+            condition,
+            allow_missing_acceptance=bool(cfg.raw.get("allow_missing_acceptance", False)),
+        )
     if condition.stack == "hf":
         from runners.hf_runner import HFRunner
 

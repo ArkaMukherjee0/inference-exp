@@ -37,6 +37,10 @@ from core.schema import RunConfig
 _TOP_LEVEL_KEYS = frozenset({
     "instance", "platform", "stack", "log_path", "prompts", "defaults", "axes",
     "interleave", "model", "notes",
+    # Explicit exemption for engines exposing no per-request acceptance counts. Speed
+    # figures survive; figures 04 and 06 do not, because they are claims about a
+    # distribution that was never measured.
+    "allow_missing_acceptance",
 })
 _DEFAULTS_KEYS = frozenset({
     "max_tokens", "ignore_eos", "temperature", "seed", "repeats", "warmup",

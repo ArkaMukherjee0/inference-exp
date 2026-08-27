@@ -83,6 +83,18 @@ def acceptance_table(df: pd.DataFrame) -> pd.DataFrame:
     if spec.empty:
         raise ValueError("no speculative conditions present")
 
+    if "acceptance_unavailable" in spec.columns:
+        exempt = spec["acceptance_unavailable"].fillna(False).astype(bool)
+        if exempt.all():
+            raise ValueError(
+                "every speculative record is marked acceptance_unavailable: this engine "
+                "reported no per-request acceptance counts, so the accepted-run-length "
+                "distribution was never measured. Figures 04 and 06 cannot be built from "
+                "these runs, and a histogram inferred from speedup alone would be "
+                "fabricated. Speed figures (01, 02, 03, 05) are unaffected."
+            )
+        spec = spec[~exempt]
+
     rows = []
     for cid, group in spec.groupby("condition_id"):
         gamma = int(group["num_speculative_tokens"].iloc[0])

@@ -274,3 +274,50 @@ def test_multiline_output_text_stays_one_jsonl_line(tmp_path):
     path = tmp_path / "log.jsonl"
     append_record(path, _valid_record(output_text="line one\nline two\n"))
     assert len(path.read_text(encoding="utf-8").strip().splitlines()) == 1
+
+
+# -- the acceptance exemption ----------------------------------------------------------
+#
+# Speculation normally implies a measured distribution, and that rule stays in force.
+# This is the one documented way past it, for engines that expose no per-request
+# acceptance at all. It is a named exemption stamped on the record, not a relaxed rule.
+
+
+def test_acceptance_exemption_allows_an_empty_histogram():
+    rec = _spec_record(
+        accepted_tokens=None, draft_tokens_proposed=None, acceptance_rate=None,
+        mean_accept_length=None, accept_length_histogram=[],
+        acceptance_unavailable=True,
+    )
+    validate_record(rec)
+
+
+def test_exemption_still_forbids_partial_acceptance_data():
+    """Half a measurement is not an exemption."""
+    rec = _spec_record(
+        accepted_tokens=53, draft_tokens_proposed=None, acceptance_rate=None,
+        mean_accept_length=None, accept_length_histogram=[],
+        acceptance_unavailable=True,
+    )
+    with pytest.raises(ValueError, match="must be null when acceptance_unavailable"):
+        validate_record(rec)
+
+
+def test_exemption_forbids_a_histogram():
+    rec = _spec_record(
+        accepted_tokens=None, draft_tokens_proposed=None, acceptance_rate=None,
+        mean_accept_length=None, accept_length_histogram=[1, 2, 3, 4, 5],
+        acceptance_unavailable=True,
+    )
+    with pytest.raises(ValueError, match="must be \[\] when acceptance_unavailable"):
+        validate_record(rec)
+
+
+def test_without_the_exemption_an_empty_histogram_still_raises():
+    """The guard against silent extraction failure is unchanged everywhere else."""
+    rec = _spec_record(
+        accepted_tokens=None, draft_tokens_proposed=None, acceptance_rate=None,
+        mean_accept_length=None, accept_length_histogram=[],
+    )
+    with pytest.raises(ValueError):
+        validate_record(rec)

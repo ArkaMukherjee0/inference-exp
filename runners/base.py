@@ -91,6 +91,7 @@ def build_record(
     is_warmup: bool,
     result: GenResult,
     latency_valid: bool = True,
+    acceptance_unavailable: bool = False,
     resolved: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble a complete, schema-valid record. Raises if the measurement is unusable."""
@@ -119,7 +120,9 @@ def build_record(
     rec["tpot_ms"] = (rec["total_ms"] - rec["ttft_ms"]) / (rec["output_tokens"] - 1)
     rec["output_text"] = result.output_text
 
-    rec.update(_spec_fields(cfg, result))
+    rec.update(_spec_fields(cfg, result, acceptance_unavailable=acceptance_unavailable))
+    if acceptance_unavailable and cfg.spec_method != "none":
+        rec["acceptance_unavailable"] = True
 
     sample = gpu_sample() if cfg.platform != "cpu" else {"clocks_sm_mhz": None, "power_draw_w": None}
     rec["clocks_sm_mhz"] = sample["clocks_sm_mhz"]
@@ -145,8 +148,19 @@ def build_record(
     return rec
 
 
-def _spec_fields(cfg: RunConfig, result: GenResult) -> dict[str, Any]:
+def _spec_fields(cfg: RunConfig, result: GenResult, *,
+                 acceptance_unavailable: bool = False) -> dict[str, Any]:
     """Derive the speculative half of a record from measured counts."""
+    if acceptance_unavailable and cfg.spec_method != "none":
+        # Null, not zero. Zero acceptance is a measurement; no acceptance data is the
+        # absence of one, and the two must not be confusable downstream.
+        return {
+            "accepted_tokens": None,
+            "draft_tokens_proposed": None,
+            "acceptance_rate": None,
+            "mean_accept_length": None,
+            "accept_length_histogram": [],
+        }
     if cfg.spec_method == "none":
         if result.accept_length_histogram or result.draft_tokens_proposed:
             raise RunnerError(

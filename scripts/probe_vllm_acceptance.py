@@ -67,11 +67,19 @@ def walk(obj: object, label: str, depth: int = 0, seen: set[int] | None = None) 
         if _interesting(name):
             print(f"  [HIT] {label}.{name} = {_describe(value)}")
             hits += 1
-        # Recurse into plain containers of objects that might hold the counts.
-        elif depth < 3 and hasattr(value, "__dict__") and not isinstance(
-            value, (str, bytes, int, float, bool, list, tuple, dict, set)
-        ):
-            hits += walk(value, f"{label}.{name}", depth + 1, seen)
+        # Descend into containers too. vLLM V1 keeps stat loggers in a dict, and the
+        # EngineCore process boundary means those loggers are the only thing in this
+        # process that ever sees acceptance counts.
+        elif depth < 3:
+            if isinstance(value, dict):
+                for key, item in list(value.items())[:8]:
+                    hits += walk(item, f"{label}.{name}[{key!r}]", depth + 1, seen)
+            elif isinstance(value, (list, tuple)) and not isinstance(value, (str, bytes)):
+                for i, item in enumerate(list(value)[:8]):
+                    if not isinstance(item, (str, bytes, int, float, bool)):
+                        hits += walk(item, f"{label}.{name}[{i}]", depth + 1, seen)
+            elif hasattr(value, "__dict__"):
+                hits += walk(value, f"{label}.{name}", depth + 1, seen)
     return hits
 
 

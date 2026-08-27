@@ -251,3 +251,25 @@ def test_fig05_labels_carry_the_held_constant_precision(measured_df):
     table = table[table["batch_size"] == table["batch_size"].min()]
     points = _platform_points(table, {"h100_tp1": 295.0}, "w4a16")
     assert all("W4A16" in label for label in points["label"])
+
+
+def test_acceptance_figures_refuse_exempt_records(measured_df):
+    """Figures 04 and 06 are claims about a distribution; absent one, they must not draw."""
+    from analysis.derive import acceptance_table
+
+    df = measured_df.copy()
+    df["acceptance_unavailable"] = df["spec_method"] != "none"
+    with pytest.raises(ValueError, match="acceptance_unavailable"):
+        acceptance_table(df)
+
+
+def test_speed_figures_survive_exempt_records(measured_df, tmp_outdir):
+    """The whole point of the exemption: speed measurements remain fully valid."""
+    from analysis.derive import speedup_table
+
+    df = measured_df.copy()
+    df["acceptance_unavailable"] = df["spec_method"] != "none"
+    table = speedup_table(df)
+    assert not table.empty
+    assert (table["speedup"] > 0).all()
+    assert fig02.render(df, tmp_outdir, target_model=DENSE).exists()
