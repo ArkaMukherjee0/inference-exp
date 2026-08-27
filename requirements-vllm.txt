@@ -1,0 +1,20 @@
+# GPU arm: the vLLM stack (instance1 / instance2 / instance3, and the smoke test).
+#
+# Install torch FIRST, matched to the box's CUDA version, then vLLM -- letting pip
+# resolve torch as a vLLM dependency often pulls a build that does not match the driver.
+#
+#   pip install -r requirements.txt -r requirements-data.txt
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124   # match your CUDA
+#   pip install -r requirements-vllm.txt
+#
+# NOTE ON VERSIONS: runners/vllm_runner.py configures speculation through the structured
+# `speculative_config` dict and reads the resolved config back to verify it. Both have
+# moved between vLLM releases. The runner raises with a specific message rather than
+# guessing, so a mismatch fails loudly at startup -- but expect to wire the per-request
+# acceptance accessor in _acceptance() to whatever your build exposes.
+#
+# Record what you actually install: `pip freeze > requirements.lock.txt`. Every record
+# also carries stack_version, so the log is self-describing either way.
+
+vllm>=0.8.0
+transformers>=4.44

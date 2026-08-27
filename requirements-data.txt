@@ -1,0 +1,9 @@
+# Dataset access: the frozen GSM8K subset and WikiText-2.
+#
+# Needed on every box that RUNS a sweep (prompts come from the frozen exam), and on the
+# box that freezes the subset. Not needed for pure analysis/plotting of an existing log.
+#
+#   pip install -r requirements.txt -r requirements-data.txt
+
+datasets>=2.14
+huggingface_hub>=0.23      # also used by scripts/setup_data.py --check-models

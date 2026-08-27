@@ -1,0 +1,12 @@
+# HF Transformers arm: MTP drafters, acceptance-schedule experiments (E4), and
+# WikiText-2 perplexity (E7).
+#
+# Separate from requirements-vllm.txt because these are different jobs: vLLM carries
+# every speed measurement, while HF is used ONLY for acceptance statistics and quality.
+# Every HF record is marked latency_valid=false and is barred from all speed figures.
+#
+#   pip install -r requirements.txt -r requirements-data.txt -r requirements-hf.txt
+#   (plus torch, matched to your CUDA as above)
+
+transformers>=4.44
+accelerate>=0.30           # device_map="auto" in HFRunner.setup()

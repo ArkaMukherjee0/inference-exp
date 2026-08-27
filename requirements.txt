@@ -1,0 +1,23 @@
+# Base: schema, config, analysis, statistics, figures, report, tests.
+#
+# Deliberately free of any model runtime. Everything here runs on a laptop with no GPU
+# and no torch -- which is the point: the statistics and all eight figures were built and
+# tested against fixtures before a GPU was involved, and can be re-run by anyone
+# reviewing the study without installing an inference stack.
+#
+#   pip install -r requirements.txt
+
+numpy>=1.24
+pandas>=2.0
+pyyaml>=6.0
+
+# Figures. Seaborn supplies faceting only; all styling comes from plots/style.py.
+matplotlib>=3.7
+seaborn>=0.13
+
+# Required by pandas.DataFrame.to_markdown, which scripts/build_report.py uses for
+# report/primary_table.md. Not an import anywhere, so pip-compile style tools and import
+# scanners both miss it -- it fails at the very end of a report build instead.
+tabulate>=0.9
+
+pytest>=7.4
