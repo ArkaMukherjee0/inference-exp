@@ -1,0 +1,102 @@
+# Instance 5 -- Gemma 4 26B-A4B, gamma sweep on a large sparse MoE.
+#
+# Added after instance-4 measured its dense/MoE pair (Phi-3.5-mini vs Phi-mini-MoE) and
+# found the MoE arm never beating its own baseline: every gamma landed below 1.0, peaking
+# at 0.984, while mean accept length was HIGHER than the dense arm's at every gamma.
+# This config extends the gamma ladder to a much sparser model -- 128 experts top-8
+# against Phi-mini-MoE's 16 top-2 -- to see whether that pattern deepens with sparsity.
+#
+#   google/gemma-4-26B-A4B-it   Gemma4ForConditionalGeneration
+#   128 experts, enable_moe_block: true, ~4B active of 26B total, 51.6 GB bf16
+#
+# Verified against config.json rather than assumed: enable_moe_block is true and
+# num_experts is 128, so this is a genuine MoE -- unlike Gemma 4 E4B, whose "E" is
+# effective parameters and which carries enable_moe_block: false.
+#
+# READ THIS BEFORE PLOTTING IT AGAINST INSTANCE-4.
+#
+# This is NOT a drop-in third arm for figure 08. Figure 08 reads the difference in slope
+# between a dense and an MoE arm, and that reading is only valid because instance-4 held
+# family, tokenizer, precision and drafting mechanism fixed so architecture was the only
+# difference. This model shares none of that with the Phi pair: different family, vocab
+# 262144 against Phi's 32064, and 26B total against 3.8B. Plotted against the Phi dense
+# arm it reintroduces exactly the confound instance-4 was built to exclude.
+#
+# What it IS good for: the within-arm gamma slope, which is self-normalized (every point
+# divided by this model's own gamma=none baseline) and therefore does not depend on the
+# Phi models at all. Compare THAT slope to instance-4's MoE slope. Do not compare
+# absolute speedups, and do not put this arm on a dense-vs-MoE axis.
+stack: vllm
+platform: h100
+instance: instance-5
+
+# Distinct log. instance-4's results stay untouched in logs/instance-4.jsonl, which is
+# complete (3984 records) and checksummed alongside itself.
+log_path: logs/instance-5.jsonl
+
+# spec_method: ngram again -- prompt lookup, no draft checkpoint. Identical drafting
+# mechanism and identical drafting cost (c ~= 0) to both instance-4 arms, which is what
+# makes the gamma slopes comparable across configs even though the models are not.
+model:
+  - target_model: google/gemma-4-26B-A4B-it
+
+prompts:
+  source: gsm8k
+  split: test
+  n: 80
+  seed: 0
+  # Same deterministic 80-prompt prefix as instance-1 and instance-4.
+  allow_partial: true
+
+  # REQUIRED for this model. Measured, not assumed: fed a bare GSM8K question, this
+  # checkpoint does not answer it, it degenerates -- "Wait, I'm not sure if he made it."
+  # repeated to the token limit on gsm8k-test-2, "then then then then" on gsm8k-test-9,
+  # and a leaked literal "thought\n" prefix on gsm8k-test-5. Its template opens a
+  # <|channel>thought turn, and without that opening the model just continues the text.
+  #
+  # This is a measurement-validity issue, not a cosmetic one. Repetition is the most
+  # favourable input prompt-lookup speculation can receive, so the degenerate arm posts
+  # a LARGE and clean-looking fake speedup: gsm8k-test-9 ran at 2.59 ms/token raw
+  # against 5.99 ms/token templated, with an acceptance histogram of [3,1,0,0,37]
+  # (37 full-length accepts) where the templated run gives a healthy [38,18,3,4,10].
+  # Left off, this config would produce a beautiful gamma curve measuring nothing but
+  # the model falling apart.
+  #
+  # instance-4 does NOT set this and must not: Phi answers a bare question correctly,
+  # and turning it on there would change what those completed results mean.
+  chat_template: true
+
+defaults:
+  max_tokens: 256
+  ignore_eos: true
+  temperature: 0.0
+  seed: 42
+  repeats: 3
+  warmup: 3
+  batch_size: 1
+  tensor_parallel_size: 1
+  target_dtype: bf16
+  # Raised from instance-4's 0.85. Weights are 48.1 GiB of an 79.6 GiB card; at 0.85 the
+  # budget is 67.7 GiB, leaving ~16 GiB for a KV cache that needs ~10.2 GiB to hold one
+  # sequence at this model's 262144-token max_position_embeddings. That starts, but with
+  # almost no margin. 0.92 gives ~25 GiB of KV headroom instead.
+  #
+  # NOTE: runners/vllm_runner.py does not expose max_model_len, so vLLM will default to
+  # the full 262144 context. If the engine still refuses to allocate a KV cache, that
+  # knob has to be plumbed through the runner -- it cannot be fixed from this file.
+  gpu_memory_utilization: 0.92
+
+axes:
+  # Same gamma ladder as instance-1 and instance-4, so the slopes are read off identical
+  # x positions.
+  spec:
+    - {spec_method: none, num_speculative_tokens: null}
+    - {spec_method: ngram, num_speculative_tokens: 1}
+    - {spec_method: ngram, num_speculative_tokens: 2}
+    - {spec_method: ngram, num_speculative_tokens: 3}
+    - {spec_method: ngram, num_speculative_tokens: 4}
+    - {spec_method: ngram, num_speculative_tokens: 5}
+    - {spec_method: ngram, num_speculative_tokens: 7}
+    - {spec_method: ngram, num_speculative_tokens: 10}
+
+interleave: true

@@ -82,10 +82,61 @@ def load_prompts(cfg: SweepConfig) -> PromptSet:
             f"NOTE: partial prompt set -- {cfg.prompts.n} of the frozen exam "
             f"(allow_partial). Not comparable with a full-exam sweep."
         )
+    text = {e.prompt_id: e.prompt for e in examples}
+    if cfg.prompts.chat_template:
+        text = _apply_chat_template(cfg, text)
     return PromptSet(
         ids=[e.prompt_id for e in examples],
-        text={e.prompt_id: e.prompt for e in examples},
+        text=text,
     )
+
+
+def _apply_chat_template(cfg: SweepConfig, text: dict[str, str]) -> dict[str, str]:
+    """Wrap every prompt in the target model's chat template.
+
+    Applied once, to the shared prompt set, so that every condition in the sweep sees
+    byte-identical inputs -- the same invariant the frozen subset exists to protect.
+
+    The template is a property of the tokenizer, so a sweep spanning two different target
+    models has two different templates and no single correct answer here. That raises
+    rather than picking one: silently templating both arms with the first model's
+    template would corrupt the second arm's prompts in a way nothing downstream detects.
+    """
+    models = sorted({c.target_model for c in cfg.conditions})
+    if len(models) != 1:
+        raise ValueError(
+            "prompts.chat_template is on, but this sweep spans multiple target models "
+            f"({models}). A chat template belongs to one tokenizer; applying one model's "
+            "template to another's arm silently corrupts that arm. Split this into one "
+            "config per model, or turn chat_template off."
+        )
+    model = models[0]
+
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(model)
+    if not getattr(tok, "chat_template", None):
+        raise ValueError(
+            f"prompts.chat_template is on but {model!r} defines no chat template. "
+            "Refusing to invent one -- turn the flag off, or point at a model that has "
+            "one."
+        )
+
+    out: dict[str, str] = {}
+    for pid, question in text.items():
+        rendered = tok.apply_chat_template(
+            [{"role": "user", "content": question}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        if question.strip() not in rendered:
+            raise ValueError(
+                f"chat template for {model!r} dropped the question text for {pid!r}. "
+                "Refusing to measure a prompt that no longer contains the prompt."
+            )
+        out[pid] = rendered
+    print(f"prompts   : chat template applied ({model})")
+    return out
 
 
 # --------------------------------------------------------------------------------------

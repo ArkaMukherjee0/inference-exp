@@ -50,7 +50,7 @@ _DEFAULTS_KEYS = frozenset({
     "num_speculative_tokens",
 })
 _PROMPTS_KEYS = frozenset({"source", "split", "n", "seed", "stride", "path",
-                           "allow_partial"})
+                           "allow_partial", "chat_template"})
 
 
 @dataclass(frozen=True)
@@ -86,6 +86,23 @@ class PromptSpec:
     # analysis.stats.align_pair refuses to compare a 20-prompt condition against a
     # 250-prompt one, so a partial run cannot leak into the real results.
     allow_partial: bool = False
+    # Opt-in: wrap each prompt in the target model's chat template before measuring.
+    #
+    # Off by default, and deliberately so. Every instance measured before this existed
+    # sent the bare question, and flipping the default would silently change what those
+    # configs measure. A config that wants templating says so.
+    #
+    # It exists because a bare question is not a safe universal input. Phi-3.5 answers
+    # one; Gemma 4, whose template opens a `<|channel>thought` turn, instead degenerates
+    # into repeating the prompt -- and repetition is the single most favourable input
+    # possible for prompt-lookup speculation, so the artifact shows up as a large, clean,
+    # entirely fake speedup rather than as an obvious failure. Templating is what makes
+    # the measurement be about the model instead of about its collapse.
+    #
+    # Within one sweep every condition is templated identically, so a gamma slope stays
+    # self-normalised and valid. Across sweeps, a templated instance is NOT comparable on
+    # absolute latency to an untemplated one -- the prompts are different strings.
+    chat_template: bool = False
 
 
 @dataclass(frozen=True)
@@ -191,6 +208,7 @@ def load_sweep(path: str | Path) -> SweepConfig:
         stride=raw["prompts"].get("stride"),
         path=raw["prompts"].get("path"),
         allow_partial=bool(raw["prompts"].get("allow_partial", False)),
+        chat_template=bool(raw["prompts"].get("chat_template", False)),
     )
 
     defaults = dict(raw.get("defaults") or {})
