@@ -25,7 +25,10 @@ def render(df: pd.DataFrame, outdir: Path, *, target_model: str | None = None) -
     require_measured(df)
     assert_single_stack(df, "fig03")
 
-    table = select_model(speedup_table(df), target_model)
+    # One line per precision, so the frame may span one checkpoint per precision; a cell
+    # is (precision, batch, gamma). See select_model's cell_keys.
+    table = select_model(speedup_table(df), target_model,
+                         cell_keys=("target_dtype", "batch_size", "num_speculative_tokens"))
     if table["batch_size"].nunique() < 2:
         raise ValueError(
             "fig03 needs at least two batch sizes; this log has "

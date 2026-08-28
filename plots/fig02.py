@@ -3,11 +3,13 @@
 The headline test. Grouped bars: target precision on x, geometric-mean speculative
 speedup on y, 95% paired intervals.
 
-The predicted direction is annotated on the figure itself. That is deliberate: a reader
-who sees the prediction drawn before they see the bars can judge whether the result
-confirms it, rather than being told afterwards what the bars were always going to mean.
-If speculation and quantization spend the same memory-bound slack, the bars fall from
-left to right. A flat row falsifies the hypothesis.
+The hypothesis: if speculation and quantization spend the same memory-bound slack, the
+bars fall from left to right. A flat row falsifies it. That prediction used to be drawn
+on the figure as an arrow and a two-line caption, so a reader met it before the bars.
+It now lives in the report caption instead -- with seven gammas across three precisions
+there are twenty-one bars, and the annotation sat on top of the legend. The reference
+line at 1.0 carries the only in-figure claim that still needs making, which is where
+speculation stops paying for itself at all.
 """
 
 from __future__ import annotations
@@ -26,7 +28,11 @@ def render(df: pd.DataFrame, outdir: Path, *, target_model: str | None = None) -
     require_measured(df)
     assert_single_stack(df, "fig02")
 
-    table = select_model(speedup_table(df), target_model)
+    # Precision is this figure's x axis, and each precision is its own checkpoint, so the
+    # frame legitimately spans three target_models. One bar is one (precision, gamma)
+    # cell; as long as each of those resolves to a single checkpoint, nothing is averaged.
+    table = select_model(speedup_table(df), target_model,
+                         cell_keys=("target_dtype", "num_speculative_tokens"))
     table = table[table["batch_size"] == table["batch_size"].min()]
     if table.empty:
         raise ValueError("fig02: no batch-1 speculative conditions to plot")
@@ -36,7 +42,9 @@ def render(df: pd.DataFrame, outdir: Path, *, target_model: str | None = None) -
     if not dtypes:
         raise ValueError("fig02: no recognized target_dtype values present")
 
-    fig, ax = style.new_figure(figsize=(6.6, 4.2))
+    # Wider than the other figures: this one carries len(gammas) bars per precision, and
+    # at seven they need the room.
+    fig, ax = style.new_figure(figsize=(7.6, 4.2))
 
     x = np.arange(len(dtypes), dtype=float)
     n_groups = len(gammas)
@@ -73,46 +81,31 @@ def render(df: pd.DataFrame, outdir: Path, *, target_model: str | None = None) -
             offsets, h, yerr=np.clip(yerr, 0, None), linestyle="none",
             color=style.INK_SECONDARY, elinewidth=1.1, capsize=2.5, zorder=4,
         )
+        # Per-bar value labels are set vertically. Horizontally they overlapped their
+        # neighbours from about five gammas onward -- at seven they were unreadable, and
+        # an unreadable number on a chart is worse than no number, because it still costs
+        # the reader the attempt. Exact values live in the primary table.
         for xpos, height in zip(offsets, h):
             if np.isnan(height):
                 continue
             ax.annotate(
-                f"{height:.2f}×", xy=(xpos, height), xytext=(0, 12),
-                textcoords="offset points", ha="center", fontsize=7,
-                color=style.INK,
+                f"{height:.2f}×", xy=(xpos, height), xytext=(0, 7),
+                textcoords="offset points", ha="center", va="bottom", rotation=90,
+                fontsize=6.5, color=style.INK_SECONDARY,
             )
 
     style.reference_line(ax, 1.0)
-    _annotate_prediction(ax, x, table, dtypes)
 
     ax.set_xticks(x)
     ax.set_xticklabels([style.DTYPE_LABEL[d] for d in dtypes])
     ax.set_xlabel("target precision")
     ax.set_ylabel("speculative speedup (geometric mean)")
     ax.set_ylim(bottom=0)
-    legend = ax.legend(loc="upper right", ncol=min(len(gammas), 4), title="drafted tokens")
+    # Headroom for the rotated labels, so the tallest one does not run into the legend.
+    top = float(np.nanmax(table["speedup_hi95"].to_numpy(dtype=float)))
+    ax.set_ylim(top=top * 1.42)
+    legend = ax.legend(loc="upper right", ncol=min(len(gammas), 4), title="drafted tokens",
+                       framealpha=0.95)
     legend.get_title().set_fontsize(7.5)
-    # Below the axes: bars reach the baseline, so a lower corner would sit on the data.
-    style.annotate_n(ax, int(table["n_prompts"].min()), outside=True)
     fig.tight_layout()
     return style.save(fig, outdir, "fig02_composition")
-
-
-def _annotate_prediction(ax, x: np.ndarray, table: pd.DataFrame, dtypes: list[str]) -> None:
-    """Draw the hypothesis as an arrow across the precision axis."""
-    if len(dtypes) < 2:
-        return
-    top = float(np.nanmax(table["speedup_hi95"].to_numpy(dtype=float)))
-    y = top * 1.12
-    ax.annotate(
-        "", xy=(x[-1], y), xytext=(x[0], y),
-        arrowprops={"arrowstyle": "->", "color": style.INK_MUTED, "linewidth": 1.0,
-                    "linestyle": "--"},
-    )
-    ax.annotate(
-        "predicted: speedup shrinks as precision drops\n"
-        "(both optimizations spend the same memory-bound slack)",
-        xy=(float(np.mean(x)), y), xytext=(0, 5), textcoords="offset points",
-        ha="center", va="bottom", fontsize=7.5, color=style.INK_SECONDARY,
-    )
-    ax.set_ylim(top=y * 1.28)

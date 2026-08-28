@@ -175,13 +175,30 @@ def condition_label(row: pd.Series, *, include_model: bool = False) -> str:
     return f"{prefix}{dtype}, {method}{gamma_txt}"
 
 
-def select_model(table: pd.DataFrame, target_model: str | None = None) -> pd.DataFrame:
+def select_model(table: pd.DataFrame, target_model: str | None = None, *,
+                 cell_keys: tuple[str, ...] | None = None) -> pd.DataFrame:
     """Restrict a table to one target model.
 
     Figures that put precision or batch size on the x axis assume a single model; two
     models sharing an x position would either collide or be silently averaged, and
     averaging two different models' speedups is not a quantity that means anything. So
     the ambiguity is raised rather than resolved.
+
+    ``cell_keys`` names the columns that identify one plotted cell, and is how a figure
+    whose *precision axis moves the checkpoint* gets drawn at all. fp8 and w4a16 are
+    properties of the weights on disk rather than runtime flags, so a precision sweep is
+    necessarily a sweep over three checkpoints of one model -- which the frame-wide count
+    above reads as three different models and refuses. Selecting one of them would
+    collapse the very axis the figure exists to show.
+
+    The hazard being guarded against is two models landing in the *same* cell, not two
+    models appearing anywhere in the frame. So when ``cell_keys`` is given and every cell
+    resolves to exactly one checkpoint, nothing can be averaged and the table passes
+    through whole. A cell containing two checkpoints still raises.
+
+    This is a structural check on the data, never an inference from model names: two
+    genuinely different models each run at a different precision would also satisfy it,
+    which is why only figures whose axes *are* the precision axis pass ``cell_keys``.
     """
     if "target_model" not in table.columns:
         return table
@@ -191,6 +208,11 @@ def select_model(table: pd.DataFrame, target_model: str | None = None) -> pd.Dat
             raise ValueError(f"target_model {target_model!r} not present; have {models}")
         return table[table["target_model"] == target_model].copy()
     if len(models) > 1:
+        present = [k for k in (cell_keys or ()) if k in table.columns]
+        if present:
+            per_cell = table.groupby(present, dropna=False)["target_model"].nunique()
+            if len(per_cell) and int(per_cell.max()) == 1:
+                return table.copy()
         raise ValueError(
             f"this figure covers one target model but the frame has {len(models)}: "
             f"{models}. Pass target_model=... to choose; combining them would average "

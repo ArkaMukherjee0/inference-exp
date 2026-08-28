@@ -31,7 +31,12 @@ def render(
     c: float | None = None,
     c_by_pair: dict[tuple[str, str], float] | None = None,
     target_model: str | None = None,
+    name_suffix: str = "",
 ) -> Path:
+    """``name_suffix`` distinguishes the output files when this figure is rendered once
+    per precision, which is the normal case for a precision sweep: c is a ratio against a
+    specific target checkpoint, so bf16, fp8 and w4a16 each get their own predicted curve
+    and their own file. Without it they would overwrite one another."""
     require_measured(df)
     assert_single_stack(df, "fig04")
 
@@ -142,7 +147,7 @@ def render(
     style.annotate_n(ax_res, int(table["n_prompts"].min()), outside=True)
     # No tight_layout here: it would override the gridspec's deliberate panel spacing.
     # savefig(bbox="tight") in style.save already trims the margins.
-    return style.save(fig, outdir, "fig04_model_vs_measured")
+    return style.save(fig, outdir, f"fig04_model_vs_measured{name_suffix}")
 
 
 def _panels():

@@ -201,12 +201,47 @@ def identity_appendix(df: pd.DataFrame, *, min_rate: float = 0.95) -> str:
 # --------------------------------------------------------------------------------------
 
 
+def _fig04_jobs(df: pd.DataFrame, outdir: Path, fig04, *, c: float | None,
+                c_by_pair: dict[tuple[str, str], float] | None) -> list[tuple[str, Any]]:
+    """One figure 04 per target checkpoint, each with its own measured c.
+
+    c is a ratio against a *specific* target: the same 1B drafter is relatively cheaper
+    against a bf16 8B than against the same model quantized to w4a16, because quantizing
+    shortens the target's step and leaves the draft's alone. Drawing all three precisions
+    against a single c would put two predicted curves on the wrong cost ratio -- and they
+    would look entirely reasonable, which is what makes it worth splitting.
+
+    With no c_by_pair this falls back to the single-c call, so behaviour is unchanged for
+    a single-precision log.
+    """
+    if not c_by_pair:
+        return [("fig04", lambda: fig04.render(df, outdir, c=c))]
+
+    models = sorted(df["target_model"].dropna().unique())
+    if len(models) <= 1:
+        return [("fig04", lambda: fig04.render(df, outdir, c=c, c_by_pair=c_by_pair))]
+
+    jobs: list[tuple[str, Any]] = []
+    for model in models:
+        dtypes = sorted(df[df["target_model"] == model]["target_dtype"].dropna().unique())
+        tag = dtypes[0] if len(dtypes) == 1 else model.split("/")[-1]
+        jobs.append((
+            f"fig04:{tag}",
+            # Bind both loop variables; a bare closure would render the last model N times.
+            lambda m=model, s=tag: fig04.render(
+                df, outdir, c=c, c_by_pair=c_by_pair, target_model=m, name_suffix=f"_{s}"
+            ),
+        ))
+    return jobs
+
+
 def render_figures(
     df: pd.DataFrame,
     outdir: Path,
     *,
     scored: pd.DataFrame | None = None,
     c: float | None = None,
+    c_by_pair: dict[tuple[str, str], float] | None = None,
     ridge_points: dict[str, float] | None = None,
     perplexity: dict[str, Any] | None = None,
     architecture: dict[str, str] | None = None,
@@ -226,7 +261,7 @@ def render_figures(
         ("fig01", lambda: fig01.render(df, outdir, scored=scored)),
         ("fig02", lambda: fig02.render(df, outdir)),
         ("fig03", lambda: fig03.render(df, outdir)),
-        ("fig04", lambda: fig04.render(df, outdir, c=c)),
+        *_fig04_jobs(df, outdir, fig04, c=c, c_by_pair=c_by_pair),
         ("fig05", lambda: fig05.render(df, outdir, ridge_points=ridge_points or {})),
         ("fig06", lambda: fig06.render(df, outdir)),
         ("fig07", lambda: fig07.render(df, outdir, perplexity=perplexity or {}, scored=scored)),
@@ -252,6 +287,7 @@ def build(
     outdir: Path,
     *,
     c: float | None = None,
+    c_by_pair: dict[tuple[str, str], float] | None = None,
     ridge_points: dict[str, float] | None = None,
     perplexity: dict[str, Any] | None = None,
     architecture: dict[str, str] | None = None,
@@ -289,7 +325,7 @@ def build(
     )
 
     figures = render_figures(
-        df, outdir, scored=scored, c=c, ridge_points=ridge_points,
+        df, outdir, scored=scored, c=c, c_by_pair=c_by_pair, ridge_points=ridge_points,
         perplexity=perplexity, architecture=architecture
     )
     (outdir / "figures.json").write_text(
@@ -336,6 +372,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="platform_key=path/to/host_micro.json, for figure 05")
     ap.add_argument("--architecture", nargs="*", default=None,
                     help="model=dense|moe, for figure 08")
+    ap.add_argument("--c-by-pair", default=None,
+                    help="path to a scripts.measure_c result; gives figure 04 a separate "
+                         "measured c per target checkpoint")
     ap.add_argument("--perplexity", nargs="*", default=None,
                     help="target_dtype=path/to/ppl.json, for figure 07 "
                          "(written by scripts.run_perplexity)")
@@ -346,6 +385,12 @@ def main(argv: list[str] | None = None) -> int:
         from plots.fig05 import ridge_points_from_micro
 
         ridge = ridge_points_from_micro(dict(kv.split("=", 1) for kv in args.micro))
+
+    c_pairs = None
+    if args.c_by_pair:
+        from scripts.measure_c import load_c_by_pair
+
+        c_pairs = load_c_by_pair(args.c_by_pair)
 
     ppl = None
     if args.perplexity:
@@ -358,8 +403,8 @@ def main(argv: list[str] | None = None) -> int:
 
     arch = dict(kv.split("=", 1) for kv in args.architecture) if args.architecture else None
 
-    out = build(args.logs, Path(args.outdir), c=args.c, ridge_points=ridge,
-                perplexity=ppl, architecture=arch)
+    out = build(args.logs, Path(args.outdir), c=args.c, c_by_pair=c_pairs,
+                ridge_points=ridge, perplexity=ppl, architecture=arch)
     print(f"\n{out['n_records']} records -> {args.outdir}")
     for name, path in out["figures"].items():
         print(f"  {name}: {path}")
